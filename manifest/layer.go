@@ -159,6 +159,13 @@ func NewLayerFromLayer(digest, mediatype, from string) (Layer, error) {
 }
 
 func touchLayer(path string) error {
+	// A blob may be a symlink to a file in a Hugging Face repository copy
+	// (ollama cluster). Chtimes follows the link and fails when the file
+	// belongs to another user or sits on NFS with root squashing; the link's
+	// own mtime already protects it during the prune grace period.
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
 	now := time.Now()
 	return os.Chtimes(path, now, now)
 }

@@ -64,3 +64,46 @@ type DeviceMemory struct {
 	Remote bool   `json:"remote,omitempty"`
 	Size   uint64 `json:"size"`
 }
+
+// LinkRequest is the body of POST /api/cluster/link.
+type LinkRequest struct {
+	Digest string `json:"digest"`
+	Path   string `json:"path"`
+}
+
+// LinkResponse is returned by POST /api/cluster/link.
+type LinkResponse struct {
+	Digest  string `json:"digest"`
+	Path    string `json:"path"`
+	Created bool   `json:"created"`
+}
+
+// LinksResponse is returned by GET /api/cluster/links.
+type LinksResponse struct {
+	Links []Link `json:"links"`
+}
+
+// RelinkResponse is returned by POST /api/cluster/relink.
+type RelinkResponse struct {
+	Changes []RelinkResult `json:"changes"`
+}
+
+// ModelsResponse is returned by GET /api/cluster/models.
+type ModelsResponse struct {
+	Models []ModelFiles `json:"models"`
+}
+
+// ModelFiles lists the blobs of one Ollama model and where their data is.
+type ModelFiles struct {
+	Model string     `json:"model"`
+	Blobs []BlobFile `json:"blobs"`
+}
+
+// BlobFile is one blob of a model. Target is set when the blob is a link to
+// a file in a repository copy; OK is false when that file is not reachable.
+type BlobFile struct {
+	Digest string `json:"digest"`
+	Size   int64  `json:"size"`
+	Target string `json:"target,omitempty"`
+	OK     bool   `json:"ok"`
+}
