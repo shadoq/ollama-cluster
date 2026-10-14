@@ -39,6 +39,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/cmd/clustercmd"
 	"github.com/ollama/ollama/cmd/config"
 	"github.com/ollama/ollama/cmd/launch"
 	"github.com/ollama/ollama/cmd/tui"
@@ -2783,6 +2784,7 @@ func NewCLI() *cobra.Command {
 		runnerCmd,
 		gpuDiscoverCmd,
 		launch.LaunchCmd(checkServerHeartbeat, runInteractiveTUI),
+		clustercmd.Command(),
 	)
 
 	return rootCmd
