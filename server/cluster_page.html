@@ -1,0 +1,408 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ollama cluster</title>
+<link rel="icon" href="data:,">
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #677085; --line: #e2e5eb;
+  --accent: #2f6fed; --remote: #8a4fe0; --ok: #1f9d55; --warn: #c27c0e; --bad: #d64545;
+  --bar: #e9ecf2;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12151b; --panel: #1a1e26; --text: #e4e7ee; --muted: #8d95a8; --line: #2a303b;
+    --accent: #5b8ff9; --remote: #a77bf0; --ok: #3cc47c; --warn: #e2a33b; --bad: #f06a6a;
+    --bar: #262b35;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 1; }
+header h1 { font-size: 17px; margin: 0; }
+header .meta { color: var(--muted); }
+header .right { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 6px; padding: 3px 10px; cursor: pointer; }
+main { padding: 16px 20px 40px; display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); max-width: 1600px; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+section.wide { grid-column: 1 / -1; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 5px 8px 5px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+tr:last-child td { border-bottom: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+.muted { color: var(--muted); }
+.empty { color: var(--muted); padding: 6px 0; }
+.ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+.machines { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.machine { border: 1px solid var(--line); border-radius: 6px; padding: 10px; }
+.machine .name { font-weight: 600; }
+.bar { height: 10px; background: var(--bar); border-radius: 5px; overflow: hidden; display: flex; margin: 8px 0 4px; }
+.bar span { display: block; height: 100%; }
+.bar .local { background: var(--accent); } .bar .remote { background: var(--remote); } .bar .other { background: var(--muted); opacity: .45; }
+.pill { display: inline-block; padding: 0 7px; border-radius: 9px; font-size: 12px; border: 1px solid var(--line); }
+.scroll { max-height: 420px; overflow: auto; }
+.log td { padding: 3px 8px 3px 0; }
+.wrap { word-break: break-word; }
+.ranges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
+.ranges button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.charts { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); }
+.chart { position: relative; min-width: 0; }
+.chart h3 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
+.chart svg { width: 100%; height: auto; display: block; }
+.chart svg text { fill: var(--muted); font-size: 10px; }
+.chart svg .grid { stroke: var(--line); stroke-width: 1; }
+.chart svg .guide { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.tip { position: absolute; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font-size: 12px; box-shadow: 0 2px 8px rgba(0,0,0,.15); white-space: nowrap; z-index: 2; display: none; }
+@media (max-width: 600px) { .charts { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { main { padding: 12px; grid-template-columns: 1fr; } header { padding: 12px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ollama cluster</h1>
+  <span class="meta" id="version">-</span>
+  <span class="meta" id="uptime"></span>
+  <span class="right"><span class="meta" id="updated">loading</span><button id="pause">Pause</button></span>
+</header>
+<main>
+  <section class="wide"><h2>Machines</h2><div class="machines" id="machines"></div></section>
+  <section class="wide"><h2>Loaded models</h2><div id="loaded"></div></section>
+  <section class="wide"><h2>Over time</h2>
+    <div class="ranges" id="ranges"></div>
+    <div class="charts" id="charts"></div>
+  </section>
+  <section><h2>Requests running now</h2><div id="inflight"></div></section>
+  <section><h2>Requests since start</h2><div id="totals"></div></section>
+  <section class="wide"><h2>Last requests</h2><div class="scroll" id="recent"></div></section>
+  <section class="wide"><h2>Server log (INFO and above)</h2><div class="scroll" id="log"></div></section>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let paused = false, timer = null;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}
+function bytes(b) {
+  if (!b) return "0 B";
+  const u = ["B", "kB", "MB", "GB", "TB"]; let i = 0;
+  while (b >= 1000 && i < u.length - 1) { b /= 1000; i++; }
+  return (i ? b.toFixed(1) : b) + " " + u[i];
+}
+function dur(ns) {
+  const s = ns / 1e9;
+  if (s < 1) return Math.round(s * 1000) + " ms";
+  if (s < 60) return s.toFixed(1) + " s";
+  if (s < 3600) return Math.floor(s / 60) + " min " + Math.round(s % 60) + " s";
+  return Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min";
+}
+function ctx(n) {
+  if (!n) return "-";
+  return n % 1000 === 0 ? (n / 1000) + "k" : n % 1024 === 0 ? (n / 1024) + "k" : n >= 1000 ? Math.round(n / 1000) + "k" : String(n);
+}
+function time(t) { return new Date(t).toLocaleTimeString(); }
+function table(head, rows, empty) {
+  if (!rows.length) return `<div class="empty">${empty}</div>`;
+  const th = head.map(h => `<th class="${h.endsWith("#") ? "num" : ""}">${h.replace(/#$/, "")}</th>`).join("");
+  return `<table><thead><tr>${th}</tr></thead><tbody>${rows.join("")}</tbody></table>`;
+}
+function workerFor(st, name) {
+  for (const w of st.workers || []) {
+    const ep = w.worker.addr + ":" + (w.worker.rpc_port || 50052);
+    if (name.includes(ep)) return w.worker.name || ep;
+  }
+  return name;
+}
+
+function renderMachines(st) {
+  const cards = [];
+  for (const d of st.devices || []) {
+    // a busy worker is full for the scheduler; show what the worker reports
+    let free = d.free_memory;
+    if (d.remote) {
+      const w = (st.workers || []).find(w => d.name.includes("[" + w.worker.addr + ":"));
+      const rd = w && w.status && w.status.devices && w.status.devices[Number((d.name.match(/^RPC(\d+)/) || [0, 0])[1])];
+      if (rd) free = rd.free_memory;
+    }
+    const used = d.total_memory - free;
+    let models = 0;
+    for (const l of st.loaded || []) for (const m of l.devices || []) if (m.name === d.name) models += m.size;
+    const other = Math.max(used - models, 0);
+    const pct = v => d.total_memory ? (100 * v / d.total_memory).toFixed(1) : 0;
+    let state = "";
+    if (d.remote) {
+      const w = (st.workers || []).find(w => d.name.includes("[" + w.worker.addr + ":"));
+      if (w) {
+        state = !w.usable ? `<span class="bad">not used: ${esc(w.problem)}</span>`
+          : w.busy ? `<span class="warn">holds a split model</span>` : `<span class="ok">idle, ready</span>`;
+        if (w.status && w.status.transport) state += ` <span class="muted">- ${esc(w.status.transport)}</span>`;
+      }
+    } else {
+      state = `<span class="ok">this machine</span>`;
+    }
+    cards.push(`<div class="machine">
+      <div class="name">${esc(d.remote ? "Worker " + workerFor(st, d.name) : (d.description || d.name))}</div>
+      <div class="muted mono">${esc(d.name)}</div>
+      <div class="bar"><span class="${d.remote ? "remote" : "local"}" style="width:${pct(models)}%"></span><span class="other" style="width:${pct(other)}%"></span></div>
+      <div>${bytes(free)} free of ${bytes(d.total_memory)} <span class="muted">(models ${bytes(models)}, other ${bytes(other)})</span></div>
+      <div>${state}</div></div>`);
+  }
+  for (const w of st.workers || []) {
+    if (!w.usable && !(st.devices || []).some(d => d.remote && d.name.includes("[" + w.worker.addr + ":"))) {
+      cards.push(`<div class="machine"><div class="name">Worker ${esc(w.worker.name || w.worker.addr)}</div>
+        <div class="bad">not used: ${esc(w.problem)}</div><div class="muted">${esc(w.fix || "")}</div></div>`);
+    }
+  }
+  $("machines").innerHTML = cards.join("") || `<div class="empty">No devices reported.</div>`;
+}
+
+function policyText(c) {
+  let p = c.policy || "auto";
+  if (p === "worker-first" && c.worker_first_from) p += ` from ${bytes(c.worker_first_from)}`;
+  if (c.keep_free_here) p += `, ${bytes(c.keep_free_here)} kept free here`;
+  const rules = Object.entries(c.models || {});
+  if (rules.length) p += ", " + rules.map(([m, w]) => `${m}: ${w}`).join(", ");
+  return p;
+}
+
+function renderLoaded(st, act) {
+  const now = Date.parse(act.now);
+  const rows = (st.loaded || []).map(l => {
+    let local = 0; const parts = [];
+    for (const d of l.devices || []) {
+      if (d.remote) parts.push(`${esc(workerFor(st, d.name))} ${bytes(d.size)}`); else local += d.size;
+    }
+    const where = !parts.length ? "here" : local === 0 ? `<span class="pill">worker</span> ${parts.join(" + ")}` : `<span class="pill">split</span> here ${bytes(local)} + ${parts.join(" + ")}`;
+    let until = "-";
+    if (l.loading) until = `<span class="warn">loading</span>`;
+    else if (l.active > 0) until = `<span class="ok">in use</span>`;
+    else if (l.keep_alive < 0) until = "never";
+    else if (l.expires_at && !l.expires_at.startsWith("0001")) {
+      const left = Date.parse(l.expires_at) - now;
+      until = left > 0 ? "in " + dur(left * 1e6) : "now";
+    }
+    const c = l.train_context && l.train_context !== l.context ? `${ctx(l.context)} <span class="muted">of ${ctx(l.train_context)}</span>` : ctx(l.context);
+    return `<tr><td class="wrap">${esc(l.model)}</td><td class="num">${bytes(l.size || (l.devices || []).reduce((a, d) => a + d.size, 0))}</td>
+      <td>${where}</td><td class="num">${c}</td><td class="num">${l.parallel || "-"}</td><td class="num">${l.active}</td><td>${until}</td></tr>`;
+  });
+  $("loaded").innerHTML = table(["Model", "Memory#", "Where", "Context#", "Slots#", "Active#", "Unloads"], rows, "No model is loaded.");
+}
+
+function renderActivity(act) {
+  $("inflight").innerHTML = table(["Model", "Path", "Client", "Running#"],
+    act.in_flight.map(r => `<tr><td class="wrap">${esc(r.model || "-")}</td><td class="mono">${esc(r.method)} ${esc(r.path)}</td><td class="mono">${esc(r.client)}</td><td class="num">${dur(r.duration)}</td></tr>`),
+    "Nothing is running.");
+
+  const models = Object.entries(act.by_model || {}).sort((a, b) => b[1] - a[1]);
+  $("totals").innerHTML = `<div>${act.total} finished, <span class="${act.errors ? "bad" : "muted"}">${act.errors} with a server error</span></div>` +
+    table(["Model", "Requests#"], models.map(([m, n]) => `<tr><td class="wrap">${esc(m)}</td><td class="num">${n}</td></tr>`), "No requests with a model yet.");
+
+  $("recent").innerHTML = table(["Time", "Model", "Path", "Client", "Status#", "Duration#", "Sent#"],
+    act.recent.slice(0, 100).map(r => {
+      const cls = r.status >= 500 ? "bad" : r.status >= 400 ? "warn" : "ok";
+      return `<tr><td class="mono">${time(r.start)}</td><td class="wrap">${esc(r.model || "-")}</td><td class="mono">${esc(r.method)} ${esc(r.path)}</td>
+        <td class="mono">${esc(r.client)}</td><td class="num ${cls}">${r.status}</td><td class="num">${dur(r.duration)}</td><td class="num">${bytes(r.bytes)}</td></tr>`;
+    }), "No requests since the server started.");
+
+  $("log").innerHTML = table(["Time", "Level", "Message"],
+    act.log.slice(0, 200).map(e => {
+      const cls = e.level.startsWith("ERROR") ? "bad" : e.level.startsWith("WARN") ? "warn" : "muted";
+      return `<tr class="log"><td class="mono">${time(e.time)}</td><td class="${cls}">${esc(e.level)}</td><td class="wrap">${esc(e.message)} <span class="muted mono">${esc(e.attrs)}</span></td></tr>`;
+    }), "Nothing logged yet.");
+}
+
+// --- charts -------------------------------------------------------------------
+
+const RANGES = [["15 min", 15], ["1 h", 60], ["6 h", 360], ["24 h", 1440]];
+const PALETTE = ["#2f6fed", "#e8762d", "#1f9d55", "#c2417e", "#8a4fe0", "#0f9fb5", "#b58b00", "#d64545", "#5a6b8c", "#7fb800"];
+let range = 60, historyAt = 0;
+// a model keeps its color while the page is open
+const modelColors = {};
+try { range = Number(localStorage.getItem("cluster-range")) || 60; } catch (e) {}
+
+function hm(t) { return new Date(t).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"}); }
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function machineColor(i) { return i === 0 ? cssVar("--accent") : i === 1 ? cssVar("--remote") : PALETTE[(i + 3) % PALETTE.length]; }
+
+// chart draws one SVG chart.
+// c: {title, xs, series: [{name, color, values, dots}], kind: line|area|bar, stacked, yMax, fmt, from, to, barWidth}
+function chart(c) {
+  const W = 560, H = 180, L = 52, R = 8, T = 8, B = 20, w = W - L - R, h = H - T - B;
+  const x = t => L + (t - c.from) / (c.to - c.from) * w;
+  const base = new Array(c.xs.length).fill(0);
+  let top = 0;
+  const layers = c.series.map(s => {
+    const lo = base.slice();
+    const hi = s.values.map((v, i) => {
+      if (v == null) return null;
+      const y = c.stacked ? base[i] + v : v;
+      if (c.stacked) base[i] = y;
+      top = Math.max(top, y);
+      return y;
+    });
+    return {s, lo, hi};
+  });
+  const yMax = c.yMax || (top > 0 ? top * 1.1 : 1);
+  const y = v => T + h - Math.min(v, yMax) / yMax * h;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}">`;
+  for (let i = 0; i <= 4; i++) {
+    const v = yMax * i / 4, yy = y(v);
+    svg += `<line class="grid" x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}"/><text x="${L - 4}" y="${yy + 3}" text-anchor="end">${esc(c.fmt(v))}</text>`;
+  }
+  for (let i = 0; i <= 4; i++) {
+    const t = c.from + (c.to - c.from) * i / 4;
+    svg += `<text x="${x(t)}" y="${H - 4}" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}">${hm(t)}</text>`;
+  }
+  for (const {s, lo, hi} of layers) {
+    if (c.kind === "bar") {
+      const bw = Math.max(1, c.barWidth / (c.to - c.from) * w * 0.8);
+      hi.forEach((v, i) => {
+        if (v == null || v === lo[i]) return;
+        svg += `<rect x="${x(c.xs[i]) - bw / 2}" y="${y(v)}" width="${bw}" height="${Math.max(0, y(lo[i]) - y(v))}" fill="${s.color}"/>`;
+      });
+      continue;
+    }
+    // runs of points without gaps
+    const runs = [];
+    let run = [];
+    hi.forEach((v, i) => { if (v == null) { if (run.length) runs.push(run); run = []; } else run.push(i); });
+    if (run.length) runs.push(run);
+    for (const r of runs) {
+      const line = r.map((i, k) => `${k ? "L" : "M"}${x(c.xs[i]).toFixed(1)},${y(hi[i]).toFixed(1)}`).join("");
+      if (c.kind === "area") {
+        const back = r.slice().reverse().map(i => `L${x(c.xs[i]).toFixed(1)},${y(lo[i]).toFixed(1)}`).join("");
+        svg += `<path d="${line}${back}Z" fill="${s.color}" fill-opacity=".35" stroke="none"/>`;
+      }
+      svg += `<path d="${line}" fill="none" stroke="${s.color}" stroke-width="1.6"/>`;
+      if (s.dots || r.length === 1) for (const i of r) svg += `<circle cx="${x(c.xs[i])}" cy="${y(hi[i])}" r="2.4" fill="${s.color}"/>`;
+    }
+  }
+  if (!c.series.length) svg += `<text x="${L + w / 2}" y="${T + h / 2}" text-anchor="middle">no data in this range</text>`;
+  svg += `<line class="guide" x1="0" x2="0" y1="${T}" y2="${T + h}" style="display:none"/>`;
+  svg += `<rect x="${L}" y="${T}" width="${w}" height="${h}" fill="transparent"/></svg>`;
+  const legend = c.series.map(s => `<span><i style="background:${s.color}"></i>${esc(s.name)}</span>`).join("");
+  return {html: `<div class="chart"><h3>${esc(c.title)}</h3>${svg}<div class="legend">${legend}</div><div class="tip"></div></div>`, c, W, L, w};
+}
+
+// hover shows the values at the nearest point
+function attachHover(el, ch) {
+  const svg = el.querySelector("svg"), tip = el.querySelector(".tip"), guide = svg.querySelector(".guide");
+  const c = ch.c;
+  svg.addEventListener("mousemove", ev => {
+    const box = svg.getBoundingClientRect();
+    const px = (ev.clientX - box.left) / box.width * ch.W;
+    const t = c.from + (px - ch.L) / ch.w * (c.to - c.from);
+    let best = -1, bd = Infinity;
+    c.xs.forEach((xt, i) => { const d = Math.abs(xt - t); if (d < bd) { bd = d; best = i; } });
+    if (best < 0 || px < ch.L) { tip.style.display = "none"; guide.style.display = "none"; return; }
+    const gx = ch.L + (c.xs[best] - c.from) / (c.to - c.from) * ch.w;
+    guide.setAttribute("x1", gx); guide.setAttribute("x2", gx); guide.style.display = "";
+    const rows = c.series.map(s => [s, s.values[best]]).filter(([, v]) => v != null && (v !== 0 || c.kind === "line"));
+    tip.innerHTML = `<div class="muted">${new Date(c.xs[best]).toLocaleTimeString()}</div>` +
+      (rows.length ? rows.map(([s, v]) => `<div><i style="display:inline-block;width:8px;height:8px;background:${s.color};margin-right:5px"></i>${esc(s.name)}: <b>${esc(c.fmt(v))}</b></div>`).join("") : `<div class="muted">nothing</div>`);
+    tip.style.display = "block";
+    const left = gx / ch.W * box.width;
+    tip.style.left = Math.max(0, Math.min(left + 12, box.width - tip.offsetWidth)) + "px";
+    tip.style.top = "24px";
+  });
+  svg.addEventListener("mouseleave", () => { tip.style.display = "none"; guide.style.display = "none"; });
+}
+
+function renderCharts(hs) {
+  const from = Date.parse(hs.from), to = Date.parse(hs.to);
+  const models = hs.models || [];
+  const color = m => modelColors[m] || (modelColors[m] = PALETTE[Object.keys(modelColors).length % PALETTE.length]);
+  const xs = hs.samples.map(s => Date.parse(s.t));
+  const machines = [];
+  for (const s of hs.samples) for (const m of s.machines || []) if (!machines.includes(m.name)) machines.push(m.name);
+  const mval = (name, f) => hs.samples.map(s => { const m = (s.machines || []).find(m => m.name === name); return m ? f(m) : null; });
+  const totalMem = Math.max(0, ...hs.samples.flatMap(s => (s.machines || []).map(m => m.total)));
+  const sum = o => Object.values(o || {}).reduce((a, b) => a + b, 0);
+
+  const bx = hs.buckets.map(b => Date.parse(b.t) + hs.bucket_step * 500);
+  const bstep = hs.bucket_step >= 60 ? (hs.bucket_step / 60) + " min" : hs.bucket_step + " s";
+  const per = (f, keep) => models.map(m => ({name: m, color: color(m), dots: true, values: hs.buckets.map(b => f(b.models[m]))})).filter(s => s.values.some(keep));
+  const charts = [
+    chart({title: "GPU load", kind: "line", xs, from, to, yMax: 100, fmt: v => v.toFixed(0) + "%",
+      series: machines.map((n, i) => ({name: n, color: machineColor(i), values: mval(n, m => m.util >= 0 ? m.util : null)}))}),
+    chart({title: "Memory used", kind: "line", xs, from, to, yMax: totalMem || undefined, fmt: v => bytes(v),
+      series: machines.map((n, i) => ({name: n, color: machineColor(i), values: mval(n, m => m.used)}))}),
+    chart({title: "Requests running, by model", kind: "area", stacked: true, xs, from, to, fmt: v => String(Math.round(v * 10) / 10),
+      series: [...models.map(m => ({name: m, color: color(m), values: hs.samples.map(s => (s.active || {})[m] || 0)})),
+        {name: "without a model", color: "#999999", values: hs.samples.map(s => Math.max(0, s.in_flight - sum(s.active)))}]
+        .filter(s => s.values.some(v => v > 0))}),
+    chart({title: `Requests finished per ${bstep}, by model`, kind: "bar", stacked: true, xs: bx, from, to, barWidth: hs.bucket_step * 1000, fmt: v => String(Math.round(v)),
+      series: models.map(m => ({name: m, color: color(m), values: hs.buckets.map(b => (b.models[m] || {}).requests || 0)})).filter(s => s.values.some(v => v > 0))}),
+    chart({title: "Generation speed (tokens/s), by model", kind: "line", xs: bx, from, to, fmt: v => v.toFixed(1),
+      series: per(m => m && m.tok_per_sec ? m.tok_per_sec : null, v => v != null)}),
+    chart({title: "Average request time, by model", kind: "line", xs: bx, from, to, fmt: v => dur(v * 1e9),
+      series: per(m => m ? m.avg_seconds : null, v => v != null)}),
+    chart({title: "Memory of loaded models", kind: "area", stacked: true, xs, from, to, fmt: v => bytes(v),
+      series: models.map(m => ({name: m, color: color(m), values: hs.samples.map(s => (s.loaded || {})[m] || 0)})).filter(s => s.values.some(v => v > 0))}),
+  ];
+  const el = $("charts");
+  el.innerHTML = charts.map(ch => ch.html).join("") +
+    (hs.samples.length ? "" : `<div class="empty">No history yet: the server records the load every 5 seconds from its start.</div>`);
+  el.querySelectorAll(".chart").forEach((node, i) => attachHover(node, charts[i]));
+}
+
+function renderRanges() {
+  $("ranges").innerHTML = `<span class="muted">Range:</span>` + RANGES.map(([label, m]) => `<button data-m="${m}" class="${m === range ? "on" : ""}">${label}</button>`).join("");
+  $("ranges").querySelectorAll("button").forEach(b => b.onclick = () => {
+    range = Number(b.dataset.m);
+    try { localStorage.setItem("cluster-range", String(range)); } catch (e) {}
+    renderRanges();
+    refreshHistory(true).catch(() => {});
+  });
+}
+
+async function refreshHistory(force) {
+  if (!force && Date.now() - historyAt < 10000) return;
+  historyAt = Date.now();
+  const r = await fetch(`api/cluster/history?minutes=${range}`, {cache: "no-store"});
+  if (!r.ok) throw new Error("history " + r.status);
+  renderCharts(await r.json());
+}
+renderRanges();
+
+async function refresh() {
+  try {
+    const [st, act] = await Promise.all([
+      fetch("api/cluster/status", {cache: "no-store"}).then(r => { if (!r.ok) throw new Error("status " + r.status); return r.json(); }),
+      fetch("api/cluster/activity", {cache: "no-store"}).then(r => { if (!r.ok) throw new Error("activity " + r.status); return r.json(); }),
+    ]);
+    $("version").textContent = `Ollama ${st.version}, llama.cpp ${st.llama_cpp}, policy ${policyText(st.config)}`;
+    $("uptime").textContent = "running for " + dur((Date.parse(act.now) - Date.parse(act.started_at)) * 1e6);
+    renderMachines(st);
+    renderLoaded(st, act);
+    renderActivity(act);
+    await refreshHistory(false);
+    $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+    $("updated").className = "meta";
+  } catch (e) {
+    $("updated").textContent = "cannot reach Ollama: " + e.message;
+    $("updated").className = "bad";
+  }
+}
+function schedule() {
+  clearTimeout(timer);
+  if (!paused) timer = setTimeout(async () => { await refresh(); schedule(); }, 2000);
+}
+$("pause").onclick = () => {
+  paused = !paused;
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  if (!paused) refresh().then(schedule);
+};
+refresh().then(schedule);
+</script>
+</body>
+</html>
