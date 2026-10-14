@@ -33,6 +33,7 @@ import (
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/auth"
+	"github.com/ollama/ollama/cluster"
 	"github.com/ollama/ollama/decision"
 	"github.com/ollama/ollama/discover"
 	"github.com/ollama/ollama/envconfig"
@@ -2469,6 +2470,11 @@ func Serve(ln net.Listener) error {
 
 	var totalVRAM uint64
 	for _, gpu := range gpus {
+		// cluster workers do not raise the default context: models that fit
+		// here run here
+		if cluster.IsRemote(gpu) {
+			continue
+		}
 		totalVRAM += gpu.TotalMemory - envconfig.GpuOverhead()
 	}
 

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ollama/ollama/cluster"
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/format"
 	"github.com/ollama/ollama/llm"
@@ -366,7 +367,10 @@ func GPUDevices(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.
 		}
 	}
 
-	return append([]ml.DeviceInfo{}, devices...)
+	// Cluster workers are probed through their status port on every refresh,
+	// never through llama-server, so a worker busy with a loaded model or a
+	// worker that is down cannot stall discovery of the local GPUs.
+	return append(append([]ml.DeviceInfo{}, devices...), cluster.Devices(ctx)...)
 }
 
 func sameRefreshDevice(updated, existing ml.DeviceInfo) bool {

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -79,6 +80,11 @@ type DeviceInfo struct {
 	// overrides discovered during bootstrap. This is internal server state and
 	// is not serialized.
 	RunnerEnvOverrides map[string]string `json:"-"`
+
+	// ClusterFitMargin is memory, in bytes, that llama-server keeps free on
+	// this device when it fits the model (--fit-target). The cluster
+	// placement policy sets it; zero means the llama-server default.
+	ClusterFitMargin uint64 `json:"-"`
 }
 
 type SystemInfo struct {
@@ -276,6 +282,8 @@ func FlashAttentionSupported(l []DeviceInfo) bool {
 	for _, gpu := range l {
 		supportsFA := gpu.Library == "cpu" ||
 			gpu.Name == "Metal" || gpu.Library == "Metal" ||
+			// cluster workers: llama-server resolves flash attention per device
+			gpu.Library == "RPC" ||
 			cudaFlashAttentionSupported(gpu) ||
 			gpu.Library == "ROCm" ||
 			gpu.Library == "Vulkan"
@@ -338,7 +346,10 @@ func GetDevicesEnv(l []DeviceInfo) map[string]string {
 	}
 	// CUDA-only groups need filtering so devices removed during discovery do
 	// not reappear in the child process.
-	mustFilter := len(l) == 1 || allDevicesUseLibrary(l, "CUDA")
+	// Cluster worker devices (library RPC) live on another machine and do not
+	// affect which local devices the child process may see.
+	local := slices.DeleteFunc(slices.Clone(l), func(d DeviceInfo) bool { return d.Library == "RPC" })
+	mustFilter := len(local) == 1 || (len(local) > 0 && allDevicesUseLibrary(local, "CUDA"))
 	env := map[string]string{}
 	for _, d := range l {
 		d.updateVisibleDevicesEnv(env, mustFilter)

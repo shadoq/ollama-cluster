@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/cluster"
 	"github.com/ollama/ollama/discover"
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/format"
@@ -534,6 +535,14 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 		var err error
 		if !req.model.IsMLX() {
 			var loadErr error
+			// Model files linked from Hugging Face copies may have moved to
+			// another location (unmounted disk, powered-off node).
+			repairPaths := append(append([]string{req.model.ModelPath}, req.model.ModelShardPaths...), req.model.ProjectorPaths...)
+			if err := cluster.RepairModelLinks(repairPaths...); err != nil {
+				req.errCh <- err
+				s.loadedMu.Unlock()
+				return false
+			}
 			f, loadErr = llm.LoadModel(req.model.ModelPath, 1024, req.model.ModelShardPaths...)
 			if loadErr != nil {
 				slog.Info("failed to load model metadata", "model", req.model.ModelPath, "error", loadErr)
@@ -544,7 +553,12 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 
 			predictedCtx := effectiveLlamaServerContext(req.opts.NumCtx, f, numParallel)
 			predicted := llm.PredictServerVRAM(req.model.ModelPath, f, predictedCtx)
-			loadGpus, launchOpts = selectLlamaServerPlacement(systemInfo, gpus, predicted, req.opts)
+			loadGpus, launchOpts = selectModelPlacement(req.model.ShortName, systemInfo, gpus, predicted, s.reclaimableLocked(gpus), req.opts)
+			if err := clusterFitError(req.model.ShortName, systemInfo, gpus, loadGpus, predicted, len(s.loaded), launchOpts); err != nil {
+				req.errCh <- err
+				s.loadedMu.Unlock()
+				return false
+			}
 			availableForBatch, _, _ := availableMemoryForPlacement(systemInfo, loadGpus, launchOpts)
 			flashAttention := llm.LlamaServerFlashAttention(loadGpus)
 			req.applyAutomaticGenerationBatch(completion, predictedCtx, predicted, availableForBatch, flashAttention, loadGpus)
@@ -554,7 +568,9 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 			// Pre-flight check: estimate whether the model fits in remaining memory.
 			// llama-server auto-detects layers based on available VRAM, so if
 			// we predict it won't fit, evict before spawning.
-			if requireFull && !explicitPartialGPUOffload(launchOpts, f) && len(s.loaded) > 0 && len(loadGpus) > 0 {
+			// unloading models here frees nothing on a cluster worker, which
+			// holds one model at a time and was checked to be free
+			if requireFull && !explicitPartialGPUOffload(launchOpts, f) && len(s.loaded) > 0 && len(loadGpus) > 0 && !workersOnly(loadGpus) {
 				freeMemory, gpuFreeMemory, systemLimited := availableMemoryForPlacement(systemInfo, loadGpus, launchOpts)
 				// Use 80% of free memory as threshold to leave headroom.
 				if predictedForLoad > freeMemory*80/100 {
@@ -989,6 +1005,14 @@ func gpusForPlacement(gpus []ml.DeviceInfo, opts api.Options) []ml.DeviceInfo {
 }
 
 func selectLlamaServerPlacement(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, predictedVRAM uint64, opts api.Options) ([]ml.DeviceInfo, api.Options) {
+	return selectLlamaServerPlacementWithReclaim(systemInfo, gpus, predictedVRAM, 0, opts)
+}
+
+func selectLlamaServerPlacementWithReclaim(systemInfo ml.SystemInfo, gpus []ml.DeviceInfo, predictedVRAM, reclaimable uint64, opts api.Options) ([]ml.DeviceInfo, api.Options) {
+	if local, remote := cluster.SplitDevices(gpus); len(remote) > 0 {
+		return selectClusterPlacement("", systemInfo, local, remote, predictedVRAM, reclaimable, opts)
+	}
+
 	launchOpts := opts
 	if len(gpus) <= 1 || opts.NumGPU == 0 {
 		return gpus, launchOpts
@@ -1428,6 +1452,9 @@ func (runner *runnerRef) needsReload(ctx context.Context, req *LlmRequest) bool 
 	}
 	if runner.useMMapAuto && optsNew.UseMMap == nil {
 		optsNew.UseMMap = optsExisting.UseMMap
+	}
+	if optsNew.ClusterSplit == nil {
+		optsNew.ClusterSplit = optsExisting.ClusterSplit
 	}
 	if optsNew.NumGPU < 0 {
 		optsExisting.NumGPU = -1

@@ -178,6 +178,15 @@ set(LLAMA_CURL OFF CACHE BOOL "" FORCE)
 set(LLAMA_OPENSSL OFF CACHE BOOL "" FORCE)
 set(LLAMA_SUBPROCESS OFF CACHE BOOL "" FORCE)
 
+# ollama cluster: the ggml RPC backend lets llama-server use a second machine
+# as an extra device, and ggml-rpc-server is the worker that runs there. Both
+# come from this same pinned llama.cpp build, so they always match each other.
+# RDMA (RoCE/InfiniBand) is auto-detected by ggml when libibverbs is present.
+option(OLLAMA_RPC "Build the ggml RPC backend and the ggml-rpc-server worker" OFF)
+if(OLLAMA_RPC)
+    set(GGML_RPC ON CACHE BOOL "" FORCE)
+endif()
+
 FetchContent_Declare(
     llama_cpp
     GIT_REPOSITORY "https://github.com/ggml-org/llama.cpp.git"
@@ -601,6 +610,10 @@ else()
     # RUNTIME covers executables and Windows DLLs; LIBRARY covers .so on Linux
     install(TARGETS llama-server llama-quantize
         RUNTIME DESTINATION ${_base_dest} COMPONENT llama-server OPTIONAL)
+    if(OLLAMA_RPC AND TARGET ggml-rpc-server)
+        install(TARGETS ggml-rpc-server
+            RUNTIME DESTINATION ${_base_dest} COMPONENT llama-server)
+    endif()
     set(_llama_server_base_libs ggml-base ggml llama mtmd)
     if(TARGET llama-common)
         list(APPEND _llama_server_base_libs llama-common)
@@ -655,6 +668,7 @@ else()
                 LIST_DIRECTORIES false
                 \"\${_dir}/libggml-cpu*\"
                 \"\${_dir}/libggml-blas*\"
+                \"\${_dir}/libggml-rpc*\"
                 \"\${_dir}/ggml-cpu*.dll\"
                 \"\${_dir}/ggml-blas*.dll\"
             )

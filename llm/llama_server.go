@@ -46,6 +46,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	"github.com/ollama/ollama/api"
+	"github.com/ollama/ollama/cluster"
 	"github.com/ollama/ollama/envconfig"
 	"github.com/ollama/ollama/fs/gguf"
 	"github.com/ollama/ollama/ml"
@@ -420,6 +421,11 @@ func startLlamaServer(launch llamaServerLaunchConfig, out io.Writer) (cmd *exec.
 
 	params = appendMainGPUArgs(params, launch.opts)
 
+	if params, err = appendRPCArgs(params, launch.gpus); err != nil {
+		return nil, 0, err
+	}
+	params = appendClusterFitArgs(params, launch)
+
 	params = appendContextShiftArgs(params, launch.opts, launch.config.ContextShift)
 
 	// Set up library paths for GPU backend discovery
@@ -446,7 +452,13 @@ func startLlamaServer(launch llamaServerLaunchConfig, out io.Writer) (cmd *exec.
 // subprocess so discovery and real model runners use the same library search
 // paths and GPU backend selection.
 func SetupLlamaServerCommandEnv(cmd *exec.Cmd, exe string, gpuLibs []string, extraEnvs map[string]string) {
-	cmd.Env = os.Environ()
+	// RPC workers are passed explicitly with --rpc, only to runners placed on
+	// them. An inherited LLAMA_ARG_RPC would make every discovery run connect
+	// to the worker, which serves one client at a time and blocks while a
+	// model is loaded on it.
+	cmd.Env = slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		return strings.HasPrefix(kv, "LLAMA_ARG_RPC=")
+	})
 
 	envUpdates := make(map[string]string, len(extraEnvs)+2)
 	for k, v := range extraEnvs {
@@ -647,6 +659,82 @@ func appendMainGPUArgs(params []string, opts api.Options) []string {
 	}
 
 	return append(params, "--split-mode", "none", "--main-gpu", strconv.Itoa(*opts.MainGPU))
+}
+
+// appendRPCArgs connects llama-server to the cluster workers among the
+// selected devices. The workers are checked again right before the start; a
+// worker that stopped answering, changed version or picked up another model
+// since placement is left out and the model loads on this machine only. A
+// worker that still shows the client of a model that just unloaded gets a
+// few seconds. A model placed on the workers only is not moved here: that
+// returns an error, so the next request places it again.
+func appendRPCArgs(params []string, gpus []ml.DeviceInfo) ([]string, error) {
+	endpoints := cluster.Endpoints(gpus)
+	if len(endpoints) == 0 {
+		return params, nil
+	}
+	local, _ := cluster.SplitDevices(gpus)
+
+	var err error
+	for wait := 0; wait < 5; wait++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		err = cluster.VerifyEndpoints(ctx, endpoints)
+		cancel()
+		if err == nil || !errors.Is(err, cluster.ErrWorkerBusy) {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if err != nil {
+		if len(local) == 0 {
+			return nil, fmt.Errorf("the model is placed on the cluster worker, which is not available now: %w", err)
+		}
+		slog.Warn("cluster worker unavailable at model start, loading on this machine only", "error", err)
+		return params, nil
+	}
+
+	slog.Info("splitting model across cluster workers", "workers", strings.Join(endpoints, ","))
+	params = append(params, "--rpc", strings.Join(endpoints, ","))
+
+	// only worker devices selected: keep the model off this machine
+	if len(local) == 0 {
+		params = append(params, "--device", strings.Join(cluster.LlamaDeviceNames(gpus), ","))
+	}
+	return params, nil
+}
+
+// appendClusterFitArgs passes the memory the cluster placement policy keeps
+// free on the devices of this machine to llama-server as per-device fit
+// targets. llama-server lists worker devices first and fills devices from
+// the last one, so this machine is filled up to its targets and the workers
+// get the rest. The base target is LLAMA_ARG_FIT_TARGET when it is set to
+// one value, else the llama-server default, plus the projector pad.
+func appendClusterFitArgs(params []string, launch llamaServerLaunchConfig) []string {
+	local, remote := cluster.SplitDevices(launch.gpus)
+	if !slices.ContainsFunc(local, func(g ml.DeviceInfo) bool { return g.ClusterFitMargin > 0 }) {
+		return params
+	}
+
+	base := uint64(1024)
+	v, ok := launch.extraEnvs[llamaArgFitTargetEnv]
+	if !ok {
+		v, ok = os.LookupEnv(llamaArgFitTargetEnv)
+	}
+	if n, err := strconv.ParseUint(v, 10, 64); ok && err == nil {
+		base = n
+	}
+	pad, _ := launch.mmprojFitTargetMiB()
+
+	var targets []string
+	if slices.Contains(params, "--rpc") {
+		for range remote {
+			targets = append(targets, strconv.FormatUint(base+pad, 10))
+		}
+	}
+	for _, g := range local {
+		targets = append(targets, strconv.FormatUint(max(g.ClusterFitMargin/bytesPerMiB, base)+pad, 10))
+	}
+	return append(params, "--fit-target", strings.Join(targets, ","))
 }
 
 func appendMMProjArgs(params []string, launch llamaServerLaunchConfig) []string {
@@ -2696,6 +2784,7 @@ func (s *llamaServerRunner) stopProcess() error {
 			<-s.done
 		}
 		slog.Debug("llama-server stopped", "pid", s.Pid())
+		cluster.Released(cluster.Endpoints(s.gpus))
 	}
 	return nil
 }

@@ -599,6 +599,10 @@ type Runner struct {
 	UseMMap         *bool `json:"use_mmap,omitempty"`
 	NumThread       int   `json:"num_thread,omitempty"`
 	DraftNumPredict int   `json:"draft_num_predict,omitempty"`
+
+	// ClusterSplit forces (true) or forbids (false) splitting the model
+	// across cluster workers. Unset follows the cluster policy.
+	ClusterSplit *bool `json:"cluster_split,omitempty"`
 }
 
 // EmbedRequest is the request passed to [Client.Embed].
