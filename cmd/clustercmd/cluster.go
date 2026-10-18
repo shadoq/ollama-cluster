@@ -32,8 +32,9 @@ import (
 // Command returns the `ollama cluster` command tree.
 func Command() *cobra.Command {
 	root := &cobra.Command{
-		Use:   "cluster",
-		Short: "Use the memory of a second machine and manage model copies",
+		Use:     "cluster",
+		Aliases: []string{"cl"},
+		Short:   "Use the memory of a second machine and manage model copies",
 		Long: `Attach a second machine (e.g. a second DGX Spark on a direct cable) to this
 Ollama. The second machine runs only a small worker; this Ollama keeps one
 address, one model list and the same API, and splits models that do not fit
@@ -45,7 +46,8 @@ locations, ordered from the fastest; Ollama links to the best copy.
 Start with 'ollama cluster init' (checks only), then
 'ollama cluster add <user@host>'. Day to day: 'ollama cluster status',
 'ollama cluster ls', 'ollama cluster ps' and 'ollama cluster doctor'.
-Where models go: 'ollama cluster policy'.
+Where models go: 'ollama cluster policy'. 'ollama cl' is short for
+'ollama cluster'.
 Every command explains itself: 'ollama cluster <command> help' or
 'ollama cluster help <command>'.`,
 	}
