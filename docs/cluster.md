@@ -185,6 +185,26 @@ Same settings, `ollama cluster bench <model> --only worker`: the model gets the 
 
 A model on the worker alone is always slower than the same model here: slow dense models lose 5-6%, big ones 12-15%, fast small MoE models 22-36%, because every token goes back over the link. It pays off only when this machine has no room, or when this machine is busy with another model at the same moment.
 
+### After the merge with upstream main (llama.cpp b11669)
+
+Ollama 0.40.4-cluster-24bcdd6f (upstream `main` of 2026-10-17 plus this fork), llama.cpp b11669, the same two machines, RDMA (RoCEv2, MTU 1024). `ollama cluster bench <model> --json` with its defaults: context 32768, pp512 and tg128, warm runs are the mean ± standard deviation of 3, tokens/s. Measured 2026-10-18, one model at a time; unlike the table above the company traffic was **not** paused, so another model (`qwen3.8:27b`, 17.5 GB) was answering on the first machine during the runs. The last column is generation on 0.40.3 from the tables above (256 tokens, earlier `bench`), for comparison.
+
+| Model | Placement | Load | pp512 warm | tg128 warm | Memory here + worker | tok/s on 0.40.3 |
+|---|---|---:|---:|---:|---|---:|
+| `llama3.1:8b` | this machine | 5 s | 2925.0 ± 8.8 | 43.2 ± 0.5 | 31.0 + 0 GB | 43.1 |
+| | split | 9 s | 2728.0 ± 43.8 | 33.8 ± 0.4 | 15.6 + 17.3 GB | 33.2 |
+| | worker only | 10 s | 2740.9 ± 44.1 | 34.8 ± 0.7 | 0 + 31.0 GB | 35.2 |
+| `qwen3.6:35b` | this machine | 10 s | 2465.4 ± 12.7 | 72.4 ± 1.4 | 23.5 + 0 GB | 73.5 |
+| | split | 31 s | 2120.5 ± 51.5 | 51.8 ± 2.7 | 11.1 + 13.1 GB | 50.7 |
+| | worker only | 61 s | 1960.7 ± 59.1 | 56.7 ± 3.1 | 0 + 23.4 GB | 57.0 |
+| `gpt-oss:120b` | this machine | 18 s | 2193.0 ± 16.8 | 42.2 ± 0.6 | 64.7 + 0 GB | 41.7 |
+| | split | 1 min 20 s | 2053.9 ± 58.0 | 34.1 ± 0.5 | 32.2 + 34.8 GB | 33.1 |
+| | worker only | 2 min 7 s | 1953.4 ± 100.8 | 35.4 ± 1.3 | 0 + 64.7 GB | 36.5 (load 2 min 54 s) |
+| `qwen3.8-flash-next:125b-a6b-q4` (112.2 GB, qwen4exp, 6B active) | split | 2 min 18 s | 751.5 ± 18.9 | 23.0 ± 0.6 | 40.3 + 46.5 GB | 22.2-23.7 (context 256k) |
+| `deepseek-v4-flash:0731-mxfp4` (156.4 GB, MXFP4) | split | 3 min 29 s | 508.0 ± 11.4 | 14.2 ± 0.2 | 73.6 + 83.0 GB | - |
+
+Generation and load are the same as on 0.40.3 within the noise, so the merge did not slow the fork down; loading the whole `gpt-oss:120b` on the worker got faster. The Qwen3.5-397B files were removed from the test machines before this run, so it was not measured again.
+
 ## Known limits
 
 - The RPC server has no authentication: keep the worker on a direct cable and add the firewall rule.

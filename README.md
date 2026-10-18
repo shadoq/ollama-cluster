@@ -28,14 +28,16 @@ Requirements, what `add` changes, and how to undo it (`ollama cluster remove`): 
 
 ### Measured
 
-Two NVIDIA DGX Spark (ASUS Ascent GX10, 128 GB unified memory each) connected with a 200 Gb/s direct cable, measured on Ollama 0.40.3-cluster with llama.cpp b11351, context 32768, 256 generated tokens, warm run; "load" is the cold start. "Split" forces the split across both machines, "worker only" puts the whole model on the second machine.
+Two NVIDIA DGX Spark (ASUS Ascent GX10, 128 GB unified memory each) connected with a 200 Gb/s direct cable, measured on Ollama 0.40.4-cluster with llama.cpp b11669 (2026-10-18), `ollama cluster bench` with context 32768: tg128 generation, warm, mean of 3 runs; "load" is the cold start. "Split" forces the split across both machines, "worker only" puts the whole model on the second machine. The 397B row is from Ollama 0.40.3-cluster (llama.cpp b11351, 256 generated tokens); its files were removed from the machines before the later run.
 
 | Model | Size | this machine | split | worker only |
 |---|---:|---:|---:|---:|
-| `llama3.1:8b` | 4.9 GB | 43.1 tok/s, load 6 s | 33.2 tok/s, 9 s | 35.2 tok/s, 8 s |
-| `qwen3.6:35b` | 23.9 GB | 73.5 tok/s, 10 s | 50.7 tok/s, 32 s | 57.0 tok/s, 1 min 2 s |
-| `gpt-oss:120b` | 65.4 GB | 41.7 tok/s, 19 s | 33.1 tok/s, 1 min 22 s | 36.5 tok/s, 2 min 54 s |
-| Qwen3.5-397B-A17B UD-IQ3_XXS | 141.3 GB | does not fit | 15.3 tok/s, 3 min 8 s | does not fit |
+| `llama3.1:8b` | 4.9 GB | 43.2 tok/s, load 5 s | 33.8 tok/s, 9 s | 34.8 tok/s, 10 s |
+| `qwen3.6:35b` | 23.9 GB | 72.4 tok/s, 10 s | 51.8 tok/s, 31 s | 56.7 tok/s, 1 min 1 s |
+| `gpt-oss:120b` | 65.4 GB | 42.2 tok/s, 18 s | 34.1 tok/s, 1 min 20 s | 35.4 tok/s, 2 min 7 s |
+| Qwen3.8-Flash-Next 125B-A6B Q4 | 112.2 GB | not measured | 23.0 tok/s, 2 min 18 s | not measured |
+| DeepSeek-V4-Flash-0731 MXFP4 | 156.4 GB | does not fit | 14.2 tok/s, 3 min 29 s | does not fit |
+| Qwen3.5-397B-A17B UD-IQ3_XXS (0.40.3) | 141.3 GB | does not fit | 15.3 tok/s, 3 min 8 s | does not fit |
 
 The second machine adds room, not speed: a model that fits on one machine is faster there, which is why Ollama splits only what does not fit. Full tables for 22 models and how they were measured: [docs/cluster.md](docs/cluster.md#measured-on-two-dgx-spark-asus-ascent-gx10-connected-200-gbs). `ollama cluster bench <model>` reports the two tests of llama-bench, pp512 and tg128. Tensor parallel from newer llama.cpp (the llama.cpp in this build has it, `ollama cluster` does not use it yet) generated 1.4-1.7x faster than one machine for dense models on the same pair: [details](docs/cluster.md#tensor-parallel-in-newer-llamacpp).
 
