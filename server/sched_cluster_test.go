@@ -163,3 +163,76 @@ func TestWorkerRuleUnknownSize(t *testing.T) {
 		t.Fatalf("unknown size with a worker rule must go to the worker: %v", gpus)
 	}
 }
+
+func TestSelectClusterPlacementTensor(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "cluster.json")
+	t.Setenv("OLLAMA_CLUSTER_CONFIG", cfgPath)
+	sys := ml.SystemInfo{TotalMemory: 128 * format.GigaByte, FreeMemory: 100 * format.GigaByte}
+	local := []ml.DeviceInfo{{DeviceID: ml.DeviceID{ID: "0", Library: "CUDA"}, Name: "CUDA0", Integrated: true, TotalMemory: 120 * format.GigaByte, FreeMemory: 100 * format.GigaByte}}
+	remote := []ml.DeviceInfo{{DeviceID: ml.DeviceID{ID: "10.100.48.2:50052/0", Library: cluster.RemoteLibrary}, Name: "RPC0[10.100.48.2:50052]", TotalMemory: 120 * format.GigaByte, FreeMemory: 110 * format.GigaByte}}
+	worker := cluster.Worker{Name: "w", Addr: "10.100.48.2", LocalAddr: "10.100.48.1"}
+	save := func(c cluster.Config) {
+		t.Helper()
+		if err := c.SaveFile(cfgPath); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tensor := func(opts api.Options) bool { return opts.ClusterTensor != nil && *opts.ClusterTensor }
+	yes, no := true, false
+
+	// tensor on: a model that fits here still runs across both machines
+	save(cluster.Config{Workers: []cluster.Worker{worker}, Tensor: true})
+	gpus, launch := selectClusterPlacement("m", sys, local, remote, 20*format.GigaByte, 0, api.DefaultOptions())
+	if len(gpus) != 2 || !tensor(launch) {
+		t.Fatalf("tensor on must use both machines with tensor parallelism: %v %v", gpus, launch.ClusterTensor)
+	}
+
+	// a rule of the model wins over tensor on
+	save(cluster.Config{Workers: []cluster.Worker{worker}, Tensor: true, Models: map[string]string{"m": cluster.PlaceHere}})
+	if gpus, launch = selectClusterPlacement("m", sys, local, remote, 20*format.GigaByte, 0, api.DefaultOptions()); len(gpus) != 1 || tensor(launch) {
+		t.Fatalf("rule here must win over tensor on: %v", gpus)
+	}
+
+	// cluster_tensor=false: the policy decides (auto: fits, so here)
+	save(cluster.Config{Workers: []cluster.Worker{worker}, Tensor: true})
+	opts := api.DefaultOptions()
+	opts.ClusterTensor = &no
+	if gpus, launch = selectClusterPlacement("m", sys, local, remote, 20*format.GigaByte, 0, opts); len(gpus) != 1 || tensor(launch) {
+		t.Fatalf("cluster_tensor=false must follow the policy: %v", gpus)
+	}
+
+	// tensor off, rule tensor for the model
+	save(cluster.Config{Workers: []cluster.Worker{worker}, Models: map[string]string{"m": cluster.PlaceTensor}})
+	if gpus, launch = selectClusterPlacement("m", sys, local, remote, 20*format.GigaByte, 0, api.DefaultOptions()); len(gpus) != 2 || !tensor(launch) {
+		t.Fatalf("rule tensor must use tensor parallelism: %v", gpus)
+	}
+
+	// cluster_tensor=true forces it without any setting
+	save(cluster.Config{Workers: []cluster.Worker{worker}})
+	opts = api.DefaultOptions()
+	opts.ClusterTensor = &yes
+	if gpus, launch = selectClusterPlacement("m", sys, local, remote, 20*format.GigaByte, 0, opts); len(gpus) != 2 || !tensor(launch) {
+		t.Fatalf("cluster_tensor=true must use tensor parallelism: %v", gpus)
+	}
+
+	// half does not fit on the worker: split by layers as the policy says
+	save(cluster.Config{Workers: []cluster.Worker{worker}, Tensor: true})
+	small := []ml.DeviceInfo{remote[0]}
+	small[0].FreeMemory = 60 * format.GigaByte
+	if gpus, launch = selectClusterPlacement("m", sys, local, small, 140*format.GigaByte, 0, api.DefaultOptions()); len(gpus) != 2 || tensor(launch) {
+		t.Fatalf("model whose half does not fit the worker must be split by layers: %v %v", gpus, launch.ClusterTensor)
+	}
+
+	// busy worker: here
+	busy := []ml.DeviceInfo{remote[0]}
+	busy[0].FreeMemory = 0
+	if gpus, launch = selectClusterPlacement("m", sys, local, busy, 20*format.GigaByte, 0, api.DefaultOptions()); len(gpus) != 1 || tensor(launch) {
+		t.Fatalf("busy worker: model must stay here: %v", gpus)
+	}
+
+	// no local_addr for the worker: no tensor parallelism
+	save(cluster.Config{Workers: []cluster.Worker{{Name: "w", Addr: "10.100.48.2"}}, Tensor: true})
+	if _, launch = selectClusterPlacement("m", sys, local, remote, 20*format.GigaByte, 0, api.DefaultOptions()); tensor(launch) {
+		t.Fatal("tensor parallelism needs local_addr")
+	}
+}

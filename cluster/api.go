@@ -48,6 +48,9 @@ type LoadedModel struct {
 	Active int `json:"active"`
 	// Loading is set while the model is still being loaded.
 	Loading bool `json:"loading,omitempty"`
+	// Tensor is set when the model runs with tensor parallelism across this
+	// machine and the worker.
+	Tensor bool `json:"tensor,omitempty"`
 	// Size is the memory the model takes in total, VRAM the part on GPUs.
 	Size uint64 `json:"size,omitempty"`
 	VRAM uint64 `json:"vram,omitempty"`

@@ -60,8 +60,35 @@ func policyCmd() *cobra.Command {
 	set.Flags().Float64Var(&from, "from", 0, "worker-first: model size in GB from which models go to the worker (0: every model)")
 	set.Flags().Float64Var(&keepFree, "keep-free-here", 0, "memory in GB that models never take on this machine (0: none)")
 
+	tensor := &cobra.Command{
+		Use:   "tensor on|off",
+		Short: "Run models with tensor parallelism across both machines by default",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var on bool
+			switch args[0] {
+			case "on":
+				on = true
+			case "off":
+			default:
+				return fmt.Errorf("tensor: %q is not on or off", args[0])
+			}
+			m, err := clusterMain(cmd)
+			if err != nil {
+				return err
+			}
+			cfg := m.config()
+			cfg.Tensor = on
+			if err := m.api.saveConfig(cmd.Context(), cfg); err != nil {
+				return err
+			}
+			printPolicy(cfg)
+			return nil
+		},
+	}
+
 	model := &cobra.Command{
-		Use:   "model <name> here|split|worker|auto",
+		Use:   "model <name> here|split|worker|tensor|auto",
 		Short: "Fix where one model goes (auto removes the rule)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -71,7 +98,7 @@ func policyCmd() *cobra.Command {
 			}
 			name, place := args[0], args[1]
 			if !cluster.ValidPlacement(place) {
-				return fmt.Errorf("placement must be %s, %s, %s or %s", cluster.PlaceHere, cluster.PlaceSplit, cluster.PlaceWorker, cluster.PlaceAuto)
+				return fmt.Errorf("placement must be %s, %s, %s, %s or %s", cluster.PlaceHere, cluster.PlaceSplit, cluster.PlaceWorker, cluster.PlaceTensor, cluster.PlaceAuto)
 			}
 			cfg := m.config()
 			models := make(map[string]string, len(cfg.Models)+1)
@@ -95,7 +122,7 @@ func policyCmd() *cobra.Command {
 		},
 	}
 
-	cmd.AddCommand(set, model)
+	cmd.AddCommand(set, tensor, model)
 	return cmd
 }
 
@@ -136,6 +163,9 @@ func policySummary(c *cluster.Config) string {
 	if c.KeepFreeHere > 0 {
 		s += fmt.Sprintf("; %s kept free here", humanBytes(c.KeepFreeHere))
 	}
+	if c.Tensor {
+		s += "; tensor parallel by default"
+	}
 	if n := len(c.Models); n > 0 {
 		s += fmt.Sprintf("; %d model rule(s)", n)
 	}
@@ -146,6 +176,13 @@ func printPolicy(c *cluster.Config) {
 	fmt.Printf("Policy    %s\n", policySummary(c))
 	if c.KeepFreeHere > 0 {
 		fmt.Printf("\nModels never take the last %s of memory on this machine. A model that\ndoes not fit in the rest is split, and the split leaves that memory free.\n", humanBytes(c.KeepFreeHere))
+	}
+	if c.Tensor {
+		fmt.Println("\nModels without a rule of their own run with tensor parallelism: both machines")
+		fmt.Println("compute every layer, half of the model on each, which generates faster than")
+		fmt.Println("one machine. The model takes the worker even when it fits here. While the")
+		fmt.Println("worker holds another model, or half of the model does not fit on one of the")
+		fmt.Println("machines, the policy above decides.")
 	}
 	if c.Policy == cluster.PolicyWorkerFirst {
 		fmt.Println("\nA model that fits on the worker loads there only; a larger one is split")
@@ -178,6 +215,8 @@ func placementText(p string) string {
 		return "split: across this machine and the worker"
 	case cluster.PlaceWorker:
 		return "worker: on the worker, split with the worker filled first when too large"
+	case cluster.PlaceTensor:
+		return "tensor: tensor parallel across both machines, else as the policy says"
 	}
 	return p
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/ollama/ollama/cluster"
+	"github.com/ollama/ollama/llm"
 	"github.com/ollama/ollama/manifest"
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/types/model"
@@ -140,6 +141,7 @@ func (s *Server) ClusterStatusHandler(c *gin.Context) {
 		if r.llama != nil {
 			lm.Context = r.llama.ContextLength()
 			lm.Devices = runnerDevices(r.llama, r.gpus, gpus)
+			lm.Tensor = llm.TensorParallel(r.pid)
 		}
 		r.refMu.Unlock()
 		resp.Loaded = append(resp.Loaded, lm)

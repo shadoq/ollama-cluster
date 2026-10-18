@@ -140,7 +140,7 @@ func TestPSColumns(t *testing.T) {
 }
 
 func TestBenchModes(t *testing.T) {
-	for in, want := range map[string]string{"": "here,split,worker", "worker,local": "here,worker", "split": "split", "split,split": "split"} {
+	for in, want := range map[string]string{"": "here,split,worker,tensor", "worker,local": "here,worker", "tensor,here": "here,tensor", "split": "split", "split,split": "split"} {
 		got, err := benchModes(in)
 		if err != nil || strings.Join(got, ",") != want {
 			t.Errorf("%q: %v %v", in, got, err)

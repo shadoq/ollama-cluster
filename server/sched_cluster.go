@@ -76,6 +76,13 @@ func selectClusterPlacement(model string, systemInfo ml.SystemInfo, local, remot
 	if split != nil {
 		place = cluster.PlaceSplit
 	}
+	if t := opts.ClusterTensor; t != nil {
+		if *t {
+			place = cluster.PlaceTensor
+		} else if place == cluster.PlaceTensor {
+			place = cfg.PolicyPlacement(predictedVRAM)
+		}
+	}
 	if place == cluster.PlaceHere {
 		return localOnly("placement rule")
 	}
@@ -84,6 +91,26 @@ func selectClusterPlacement(model string, systemInfo ml.SystemInfo, local, remot
 	localAvailable, _, _ := availableMemoryForLoad(systemInfo, group)
 	capacity := localAvailable + reclaimable
 	capacity -= min(keepFree, capacity)
+
+	if place == cluster.PlaceTensor {
+		// without what unloading would free: the scheduler evicts by the
+		// memory of all selected devices, so it would not make room here
+		free := localAvailable - min(keepFree, localAvailable)
+		selected, launchOpts, reason := selectTensorPlacement(cfg, group, remote, predictedVRAM, free, opts)
+		if reason == "" {
+			slog.Info("running model with tensor parallelism across this machine and the cluster worker", "model", model,
+				"predicted", format.HumanBytes2(predictedVRAM),
+				"local_available", format.HumanBytes2(free),
+				"worker_available", format.HumanBytes2(selected[len(selected)-1].FreeMemory))
+			logSelectedGPUGroup(append(local, remote...), selected)
+			return selected, launchOpts
+		}
+		slog.Info("tensor parallelism not possible, placing the model by the policy", "model", model, "reason", reason)
+		place = cfg.PolicyPlacement(predictedVRAM)
+		if split != nil {
+			place = cluster.PlaceSplit
+		}
+	}
 	if place == cluster.PlaceAuto && (predictedVRAM == 0 || predictedVRAM <= capacity*clusterLocalFitPercent/100) {
 		return localOnly("fits on this machine")
 	}
@@ -137,6 +164,47 @@ func selectClusterPlacement(model string, systemInfo ml.SystemInfo, local, remot
 		"placement", place)
 	logSelectedGPUGroup(append(local, remote...), selected)
 	return selected, launchOpts
+}
+
+// tensorSlack is the share of the model, on top of its half, that each
+// machine must have free for tensor parallelism; llama-server cannot fit the
+// context to the memory in this mode.
+const tensorSlack = 10
+
+// selectTensorPlacement places a model with tensor parallelism on one local
+// GPU and one worker GPU, each holding half of it. llama.cpp pairs exactly two
+// RPC servers, so the local GPU is served by an RPC server of its own on the
+// direct link, next to the worker. It returns why that is not possible.
+func selectTensorPlacement(cfg *cluster.Config, group, remote []ml.DeviceInfo, predictedVRAM, localCapacity uint64, opts api.Options) ([]ml.DeviceInfo, api.Options, string) {
+	if len(group) != 1 {
+		return nil, opts, fmt.Sprintf("needs one GPU on this machine, found %d", len(group))
+	}
+	if len(remote) != 1 {
+		return nil, opts, fmt.Sprintf("needs one worker GPU, found %d", len(remote))
+	}
+	worker := remote[0]
+	if worker.FreeMemory == 0 {
+		return nil, opts, "the cluster worker is busy with another model"
+	}
+	if w, ok := cfg.WorkerByEndpoint(cluster.Endpoints(remote)[0]); !ok || w.LocalAddr == "" {
+		return nil, opts, "the worker has no address of this machine on the direct link (local_addr); run 'ollama cluster add' again"
+	}
+	if predictedVRAM == 0 {
+		return nil, opts, "the size of the model is unknown"
+	}
+	half := predictedVRAM/2 + predictedVRAM*tensorSlack/100
+	if half > localCapacity*clusterLocalFitPercent/100 {
+		return nil, opts, fmt.Sprintf("half of the model (%s) does not fit on this machine (%s available)", format.HumanBytes2(half), format.HumanBytes2(localCapacity))
+	}
+	if half+workerMargin > worker.FreeMemory {
+		return nil, opts, fmt.Sprintf("half of the model (%s) does not fit on the worker (%s available)", format.HumanBytes2(half), format.HumanBytes2(worker.FreeMemory))
+	}
+
+	launchOpts := opts
+	launchOpts.MainGPU = nil
+	on := true
+	launchOpts.ClusterTensor = &on
+	return []ml.DeviceInfo{group[0], worker}, launchOpts, ""
 }
 
 // withFitMargin returns copies of the devices where the local ones together

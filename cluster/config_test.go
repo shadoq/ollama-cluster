@@ -100,3 +100,20 @@ func TestLlamaDeviceNames(t *testing.T) {
 		t.Fatalf("names: %v", got)
 	}
 }
+
+func TestPlacementTensor(t *testing.T) {
+	c := &Config{Tensor: true, Policy: PolicyWorkerFirst, WorkerFirstFrom: 50, Models: map[string]string{"a": PlaceSplit}}
+	if p := c.Placement("a", 10); p != PlaceSplit {
+		t.Errorf("rule must win over tensor: %s", p)
+	}
+	if p := c.Placement("b", 10); p != PlaceTensor {
+		t.Errorf("tensor on: %s", p)
+	}
+	if p := c.PolicyPlacement(100); p != PlaceWorker {
+		t.Errorf("policy placement: %s", p)
+	}
+	c.Models["a"] = PlaceTensor
+	if err := c.Validate(); err != nil {
+		t.Errorf("rule tensor must be valid: %v", err)
+	}
+}

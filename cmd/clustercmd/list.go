@@ -485,6 +485,9 @@ func placement(st *cluster.StatusResponse, l cluster.LoadedModel) string {
 	if local == 0 {
 		return "worker: " + strings.Join(parts, " + ")
 	}
+	if l.Tensor {
+		return "tensor: here " + humanBytes(local) + " + " + strings.Join(parts, " + ")
+	}
 	return "split: here " + humanBytes(local) + " + " + strings.Join(parts, " + ")
 }
 
@@ -519,7 +522,7 @@ func workerState(c cluster.WorkerCheck) string {
 	}
 	state := "idle"
 	if c.Busy {
-		state = "holds a split model"
+		state = "holds a model"
 	}
 	if t := c.Status.TransportLabel(); t != "" {
 		state += ", " + t

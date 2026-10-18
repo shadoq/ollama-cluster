@@ -442,10 +442,13 @@ func startLlamaServer(launch llamaServerLaunchConfig, out io.Writer) (cmd *exec.
 
 	params = appendMainGPUArgs(params, launch.opts)
 
-	if params, err = appendRPCArgs(params, launch.gpus); err != nil {
+	var peer *tensorPeer
+	if params, peer, err = appendRPCArgs(params, launch); err != nil {
 		return nil, 0, err
 	}
-	params = appendClusterFitArgs(params, launch)
+	if peer == nil {
+		params = appendClusterFitArgs(params, launch)
+	}
 
 	params = appendContextShiftArgs(params, launch.opts, launch.config.ContextShift)
 
@@ -464,12 +467,15 @@ func startLlamaServer(launch llamaServerLaunchConfig, out io.Writer) (cmd *exec.
 	slog.Debug("subprocess", "", filteredEnv(cmd.Env))
 
 	if err = cmd.Start(); err != nil {
+		peer.stop()
 		return nil, 0, err
 	}
+	registerTensorPeer(cmd.Process.Pid, peer)
 
 	if err = AddRunnerToJob(cmd.Process.Pid); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
+		stopTensorPeer(cmd.Process.Pid)
 		return nil, 0, fmt.Errorf("assign llama-server to runner job: %w", err)
 	}
 	return cmd, port, nil
@@ -694,11 +700,14 @@ func appendMainGPUArgs(params []string, opts api.Options) []string {
 // since placement is left out and the model loads on this machine only. A
 // worker that still shows the client of a model that just unloaded gets a
 // few seconds. A model placed on the workers only is not moved here: that
-// returns an error, so the next request places it again.
-func appendRPCArgs(params []string, gpus []ml.DeviceInfo) ([]string, error) {
+// returns an error, so the next request places it again. A placement with
+// tensor parallelism also starts the local RPC server it needs and returns
+// it; when that fails the model is split by layers.
+func appendRPCArgs(params []string, launch llamaServerLaunchConfig) ([]string, *tensorPeer, error) {
+	gpus := launch.gpus
 	endpoints := cluster.Endpoints(gpus)
 	if len(endpoints) == 0 {
-		return params, nil
+		return params, nil, nil
 	}
 	local, _ := cluster.SplitDevices(gpus)
 
@@ -714,10 +723,16 @@ func appendRPCArgs(params []string, gpus []ml.DeviceInfo) ([]string, error) {
 	}
 	if err != nil {
 		if len(local) == 0 {
-			return nil, fmt.Errorf("the model is placed on the cluster worker, which is not available now: %w", err)
+			return nil, nil, fmt.Errorf("the model is placed on the cluster worker, which is not available now: %w", err)
 		}
 		slog.Warn("cluster worker unavailable at model start, loading on this machine only", "error", err)
-		return params, nil
+		return params, nil, nil
+	}
+
+	if clusterTensor(launch.opts) && len(local) == 1 && len(endpoints) == 1 {
+		if tensor, peer := appendTensorArgs(params, launch, endpoints[0]); peer != nil {
+			return tensor, peer, nil
+		}
 	}
 
 	slog.Info("splitting model across cluster workers", "workers", strings.Join(endpoints, ","))
@@ -727,7 +742,7 @@ func appendRPCArgs(params []string, gpus []ml.DeviceInfo) ([]string, error) {
 	if len(local) == 0 {
 		params = append(params, "--device", strings.Join(cluster.LlamaDeviceNames(gpus), ","))
 	}
-	return params, nil
+	return params, nil, nil
 }
 
 // appendClusterFitArgs passes the memory the cluster placement policy keeps
@@ -1146,6 +1161,7 @@ func (s *llamaServerRunner) startProcess() error {
 	// Reap subprocess when it exits.
 	go func(cmd *exec.Cmd, done chan struct{}) {
 		err := cmd.Wait()
+		stopTensorPeer(cmd.Process.Pid)
 		s.doneErr = err
 		if msg := s.lastErrMsg(); err != nil && msg != "" {
 			slog.Error("llama-server terminated", "error", err, "exit", ExitStatusFromError(err))
@@ -2859,7 +2875,7 @@ func (s *llamaServerRunner) GetDeviceInfos(ctx context.Context) []ml.DeviceInfo 
 	infos := make([]ml.DeviceInfo, len(s.gpus))
 	for i, gpu := range s.gpus {
 		infos[i] = gpu
-		used := s.vramByDevice[gpu.Name]
+		used := s.vramByDevice[gpu.Name] + tensorShare(s.Pid(), s.vramByDevice)
 
 		// Our accounting: total minus what we allocated
 		var accountedFree uint64
@@ -3093,6 +3109,12 @@ func (w *memoryParsingWriter) updateRunnerMemoryLocked() {
 		}
 	}
 
+	// split buffers of tensor parallelism are logged once, for each of two GPUs
+	if share := tensorShare(w.runner.Pid(), byDevice); share > 0 {
+		total += share
+		gpu += share
+	}
+
 	w.runner.memTotal = total
 	w.runner.memGPU = gpu
 	w.runner.memModelFileBacked = modelFileBacked
@@ -3112,7 +3134,7 @@ func (s *llamaServerRunner) VRAMByGPU(id ml.DeviceID) uint64 {
 	// --list-devices stdout, which matches the buffer log prefix.
 	for _, gpu := range s.gpus {
 		if gpu.DeviceID == id {
-			return s.vramByDevice[gpu.Name]
+			return s.vramByDevice[gpu.Name] + tensorShare(s.Pid(), s.vramByDevice)
 		}
 	}
 	return 0

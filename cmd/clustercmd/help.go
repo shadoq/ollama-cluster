@@ -185,18 +185,20 @@ Results are tokens per second; warm tests run 3 times (--repeat) and show
 mean ± standard deviation, like llama-bench. The numbers come from the
 Ollama API, so they include Ollama's own overhead.
 
-Each test runs in three placements, from a cold start and warm:
+Each test runs in four placements, from a cold start and warm:
   here    this machine alone
   split   across this machine and the worker, as the default policy splits
   worker  the worker first, as the policy worker-first places it: the whole
           model on the worker when it fits there ("worker only"), otherwise
           split with the worker filled first; for these runs the model gets
           the rule 'worker', and its previous rule comes back at the end
+  tensor  tensor parallelism across both machines, half of the model on each
 
 The model is unloaded between runs, so applications using it wait; you are
 asked first when it is loaded (or use --yes). A model that cannot fit here
-alone is not run here. Use it to decide where a model should go: a model
-that fits one machine is usually faster there.`,
+alone is not run here. Use it to decide where a model should go: split by
+layers, a model that fits one machine is faster there; tensor parallel
+usually generates faster than one machine.`,
 		example: `  ollama cluster bench qwen3.5:122b
   ollama cluster bench qwen3.5:122b --only split,worker --repeat 5
   ollama cluster bench llama3.1:8b --prompt-tokens 2048 --tokens 256
@@ -221,21 +223,40 @@ Policies:
 (any policy): a model that does not fit in the rest is split, and the split
 leaves that memory free.
 
-Rules for single models win over the policy:
+Tensor parallelism ('ollama cluster policy tensor on') runs models with
+llama.cpp -sm tensor: both machines compute every layer with half of the
+model each, so generation is faster than on one machine, also for models that
+fit here. The model takes the worker; while the worker holds another model, or
+half of the model does not fit on one machine, the policy decides.
+
+Rules for single models win over the policy and over tensor parallelism:
   here    this machine only
-  split   across this machine and the worker
+  split   across this machine and the worker, by layers
   worker  as worker-first, for this model
+  tensor  tensor parallel across both machines, for this model
   auto    remove the rule
 
 The worker holds one model at a time. When it is busy, a model that would go
 there loads here as under auto. A request with "cluster_split": true or false
-in its options still forces a split or this machine.`,
+in its options still forces a split or this machine, and "cluster_tensor":
+true or false forces or forbids tensor parallelism.`,
 		example: `  ollama cluster policy
   ollama cluster policy set worker-first --from 30
   ollama cluster policy set auto --keep-free-here 40
   ollama cluster policy model gpt-oss:120b worker
-  ollama cluster policy model qwen3.8:27b here
+  ollama cluster policy model qwen3.8:27b tensor
+  ollama cluster policy tensor on
   ollama cluster policy model qwen3.8:27b auto`,
+	},
+	"policy tensor": {
+		long: `Turn tensor parallelism for all models on or off. When on, every model
+without a rule of its own runs across both machines with llama.cpp -sm tensor,
+half of the model on each, while the worker is free and each half fits; the
+GPU of this machine is served by a second RPC server that Ollama starts on the
+direct link next to llama-server. When off, models go by the policy and
+the rule 'tensor' of single models.`,
+		example: `  ollama cluster policy tensor on
+  ollama cluster policy tensor off`,
 	},
 	"policy set": {
 		long: `Set the policy for all models: auto, spread or worker-first.
@@ -247,10 +268,11 @@ its current value, 0 turns it off.`,
   ollama cluster policy set auto --keep-free-here 0`,
 	},
 	"policy model": {
-		long: `Fix where one model goes: here, split or worker; auto removes the rule.
+		long: `Fix where one model goes: here, split, worker or tensor; auto removes the rule.
 Use the name as 'ollama ls' shows it ("name" and "name:latest" are the same).`,
 		example: `  ollama cluster policy model gpt-oss:120b worker
   ollama cluster policy model llama3.1:8b here
+  ollama cluster policy model qwen3.8:27b tensor
   ollama cluster policy model gpt-oss:120b auto`,
 	},
 	"locations": {

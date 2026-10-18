@@ -39,7 +39,7 @@ Two NVIDIA DGX Spark (ASUS Ascent GX10, 128 GB unified memory each) connected wi
 | DeepSeek-V4-Flash-0731 MXFP4 | 156.4 GB | does not fit | 14.2 tok/s, 3 min 29 s | does not fit |
 | Qwen3.5-397B-A17B UD-IQ3_XXS (0.40.3) | 141.3 GB | does not fit | 15.3 tok/s, 3 min 8 s | does not fit |
 
-The second machine adds room, not speed: a model that fits on one machine is faster there, which is why Ollama splits only what does not fit. Full tables for 22 models and how they were measured: [docs/cluster.md](docs/cluster.md#measured-on-two-dgx-spark-asus-ascent-gx10-connected-200-gbs). `ollama cluster bench <model>` reports the two tests of llama-bench, pp512 and tg128. Tensor parallel from newer llama.cpp (the llama.cpp in this build has it, `ollama cluster` does not use it yet) generated 1.4-1.7x faster than one machine for dense models on the same pair: [details](docs/cluster.md#tensor-parallel-in-newer-llamacpp).
+Split by layers, the second machine adds room, not speed: a model that fits on one machine is faster there, which is why Ollama splits only what does not fit. Full tables for 22 models and how they were measured: [docs/cluster.md](docs/cluster.md#measured-on-two-dgx-spark-asus-ascent-gx10-connected-200-gbs). `ollama cluster bench <model>` reports the two tests of llama-bench, pp512 and tg128. With tensor parallelism (`ollama cluster policy tensor on`, llama.cpp `-sm tensor`) both machines compute every layer, and generation gets faster than on one machine: `qwen3.8:27b` 34.7 against 24.4 tok/s, `gpt-oss:120b` 58.1 against 42.7, DeepSeek-V4-Flash 21.4 against 14.5 split by layers: [details](docs/cluster.md#tensor-parallel-in-newer-llamacpp). `ollama cl` is short for `ollama cluster`.
 
 ---
 

@@ -603,6 +603,11 @@ type Runner struct {
 	// ClusterSplit forces (true) or forbids (false) splitting the model
 	// across cluster workers. Unset follows the cluster policy.
 	ClusterSplit *bool `json:"cluster_split,omitempty"`
+
+	// ClusterTensor forces (true) or forbids (false) tensor parallelism
+	// across this machine and the cluster worker. Unset follows the cluster
+	// policy.
+	ClusterTensor *bool `json:"cluster_tensor,omitempty"`
 }
 
 // SystemOneRequest is the request passed to [Client.SystemOne]. It asks a

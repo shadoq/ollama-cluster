@@ -33,7 +33,11 @@ const (
 	modeHere   = "here"   // this machine alone (cluster_split=false)
 	modeSplit  = "split"  // split by the default policy (cluster_split=true)
 	modeWorker = "worker" // the worker first: a rule 'worker' for the model while it runs
+	modeTensor = "tensor" // tensor parallelism across both machines (cluster_tensor=true)
 )
+
+// benchOrder is the order of the placements in a run and in the table.
+var benchOrder = []string{modeHere, modeSplit, modeWorker, modeTensor}
 
 type benchRun struct {
 	label    string
@@ -93,7 +97,7 @@ func benchCmd() *cobra.Command {
 	var only string
 	cmd := &cobra.Command{
 		Use:   "bench <model>",
-		Short: "Measure a model (pp512, tg128) on this machine alone, split, and on the worker first",
+		Short: "Measure a model (pp512, tg128) on this machine alone, split, on the worker first and tensor parallel",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -195,7 +199,7 @@ func benchCmd() *cobra.Command {
 			var runs []benchRun
 			for _, mode := range modes {
 				for _, cold := range []bool{true, false} {
-					label := map[string]string{modeHere: "this machine", modeSplit: "two machines", modeWorker: "worker first"}[mode]
+					label := map[string]string{modeHere: "this machine", modeSplit: "two machines", modeWorker: "worker first", modeTensor: "tensor parallel"}[mode]
 					n := repeat
 					if cold {
 						label += ", cold"
@@ -249,7 +253,7 @@ func benchCmd() *cobra.Command {
 	cmd.Flags().IntVarP(&repeat, "repeat", "r", 3, "repetitions of each warm test")
 	cmd.Flags().IntVar(&numCtx, "context", defaultContextLength, "context length (num_ctx) of the runs")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "unload the model without asking")
-	cmd.Flags().StringVar(&only, "only", "", "placements to run, comma separated: here (or local), split, worker (default: all)")
+	cmd.Flags().StringVar(&only, "only", "", "placements to run, comma separated: here (or local), split, worker, tensor (default: all)")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print the results as JSON on stdout (progress goes to stderr)")
 	return cmd
 }
@@ -276,16 +280,16 @@ func unload(ctx context.Context, a *apiClient, model string) {
 // benchModes parses --only.
 func benchModes(only string) ([]string, error) {
 	if only == "" {
-		return []string{modeHere, modeSplit, modeWorker}, nil
+		return slices.Clone(benchOrder), nil
 	}
 	var modes []string
 	for _, m := range strings.Split(only, ",") {
 		switch m = strings.TrimSpace(m); m {
 		case "local":
 			m = modeHere
-		case modeHere, modeSplit, modeWorker:
+		case modeHere, modeSplit, modeWorker, modeTensor:
 		default:
-			return nil, fmt.Errorf("--only: %q is not here, split or worker", m)
+			return nil, fmt.Errorf("--only: %q is not here, split, worker or tensor", m)
 		}
 		if !slices.Contains(modes, m) {
 			modes = append(modes, m)
@@ -293,7 +297,7 @@ func benchModes(only string) ([]string, error) {
 	}
 	// here first: the check whether the model fits here looks at modes[0]
 	slices.SortStableFunc(modes, func(a, b string) int {
-		return slices.Index([]string{modeHere, modeSplit, modeWorker}, a) - slices.Index([]string{modeHere, modeSplit, modeWorker}, b)
+		return slices.Index(benchOrder, a) - slices.Index(benchOrder, b)
 	})
 	return modes, nil
 }
@@ -327,6 +331,9 @@ func (b *bencher) options(mode string, predict int) map[string]any {
 		opts["cluster_split"] = false
 	case modeSplit:
 		opts["cluster_split"] = true
+	case modeTensor:
+		opts["cluster_split"] = true
+		opts["cluster_tensor"] = true
 	}
 	return opts
 }
@@ -369,11 +376,13 @@ func (b *bencher) once(ctx context.Context, mode string) benchRun {
 		r.tg = []float64{float64(tg.EvalCount) / tg.EvalDuration.Seconds()}
 	}
 
+	tensor := false
 	if st, err := b.api.status(ctx); err == nil {
 		for _, l := range st.Loaded {
 			if !sameModel(l.Model, b.model) {
 				continue
 			}
+			tensor = l.Tensor
 			r.context = l.Context
 			for _, d := range l.Devices {
 				if d.Remote {
@@ -386,6 +395,8 @@ func (b *bencher) once(ctx context.Context, mode string) benchRun {
 	}
 	if mode != modeHere && r.remote == 0 {
 		r.err = errors.New("the model loaded on this machine only (worker not usable or busy; see 'ollama cluster status')")
+	} else if mode == modeTensor && !tensor {
+		r.err = errors.New("the model was split by layers, not by tensors (the log of Ollama says why: 'tensor parallelism not possible')")
 	}
 	return r
 }

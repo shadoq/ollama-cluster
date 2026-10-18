@@ -42,6 +42,7 @@ const (
 	PlaceHere   = "here"   // this machine only
 	PlaceSplit  = "split"  // across this machine and the worker
 	PlaceWorker = "worker" // on the worker; split with the worker filled first when it does not fit there
+	PlaceTensor = "tensor" // across this machine and the worker with tensor parallelism, else as the policy says
 )
 
 // Config is the persistent cluster setup.
@@ -61,8 +62,16 @@ type Config struct {
 	// in the rest is split, and a split model leaves it free.
 	KeepFreeHere uint64 `json:"keep_free_here,omitempty"`
 
+	// Tensor runs every model without a rule of its own with tensor
+	// parallelism across this machine and the worker (llama.cpp -sm tensor):
+	// both machines compute every layer, so generation is faster than on one
+	// machine, but the model takes the worker even when it fits here. A model
+	// runs this way only while the worker is free and half of the model fits
+	// on each machine; otherwise the policy decides.
+	Tensor bool `json:"tensor,omitempty"`
+
 	// Models fixes the placement of single models: PlaceHere, PlaceSplit,
-	// PlaceWorker or PlaceAuto, by model name.
+	// PlaceWorker, PlaceTensor or PlaceAuto, by model name.
 	Models map[string]string `json:"models,omitempty"`
 }
 
@@ -140,6 +149,16 @@ func (w Worker) Label() string {
 	return w.Addr
 }
 
+// WorkerByEndpoint returns the active worker with the RPC endpoint ep.
+func (c *Config) WorkerByEndpoint(ep string) (Worker, bool) {
+	for _, w := range c.ActiveWorkers() {
+		if w.Endpoint() == ep {
+			return w, true
+		}
+	}
+	return Worker{}, false
+}
+
 // ActiveWorkers returns the configured workers that are not disabled.
 func (c *Config) ActiveWorkers() []Worker {
 	var workers []Worker
@@ -154,7 +173,7 @@ func (c *Config) ActiveWorkers() []Worker {
 // ValidPlacement reports whether p is a placement of a model.
 func ValidPlacement(p string) bool {
 	switch p {
-	case PlaceAuto, PlaceHere, PlaceSplit, PlaceWorker:
+	case PlaceAuto, PlaceHere, PlaceSplit, PlaceWorker, PlaceTensor:
 		return true
 	}
 	return false
@@ -177,7 +196,7 @@ func (c *Config) Validate() error {
 	}
 	for m, p := range c.Models {
 		if !ValidPlacement(p) {
-			return fmt.Errorf("model %s: placement must be %s, %s, %s or %s", m, PlaceAuto, PlaceHere, PlaceSplit, PlaceWorker)
+			return fmt.Errorf("model %s: placement must be %s, %s, %s, %s or %s", m, PlaceAuto, PlaceHere, PlaceSplit, PlaceWorker, PlaceTensor)
 		}
 	}
 	return nil
@@ -198,11 +217,21 @@ func (c *Config) Rule(model string) (string, bool) {
 }
 
 // Placement decides where a model of the given size goes: a rule for the
-// model wins, then the policy.
+// model wins, then tensor parallelism when it is on, then the policy.
 func (c *Config) Placement(model string, size uint64) string {
 	if p, ok := c.Rule(model); ok && p != PlaceAuto {
 		return p
 	}
+	if c.Tensor {
+		return PlaceTensor
+	}
+	return c.PolicyPlacement(size)
+}
+
+// PolicyPlacement is the placement the policy gives a model of the given
+// size, without model rules and tensor parallelism; a model that cannot run
+// with tensor parallelism goes here.
+func (c *Config) PolicyPlacement(size uint64) string {
 	switch {
 	case c.Policy == PolicyWorkerFirst && size >= c.WorkerFirstFrom:
 		return PlaceWorker

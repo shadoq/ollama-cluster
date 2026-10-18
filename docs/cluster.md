@@ -67,13 +67,15 @@ sudo iptables -I INPUT ! -i lo -p tcp -m multiport --dports 50052,50053 ! -s 10.
 | `ollama cluster status` | machines, free memory, worker state, where loaded models sit, locations |
 | `ollama cluster ls [filter] [--files]` | every model with parameters, quantization, trained context, capabilities, whether it fits this machine or needs the worker (estimate), and where its files are: the Ollama store or a repository copy |
 | `ollama cluster ps` | loaded models with memory per machine, context in use, parallel slots, active requests and when they unload; free memory and state of each machine |
-| `ollama cluster policy` | shows or sets where models go: `policy set auto\|spread\|worker-first [--from GB] [--keep-free-here GB]`, `policy model <name> here\|split\|worker\|auto` |
+| `ollama cluster policy` | shows or sets where models go: `policy set auto\|spread\|worker-first [--from GB] [--keep-free-here GB]`, `policy tensor on\|off`, `policy model <name> here\|split\|worker\|tensor\|auto` |
 | `ollama cluster doctor [--fix]` | checks the container, locations, model links, worker, transport, firewall and the fallbacks of the last 24 h; `--fix` relinks models to the best copy |
-| `ollama cluster bench <model>` | load time and the two llama-bench tests, pp512 (prompt processing) and tg128 (generation), on this machine alone, split and on the worker first, cold and warm (warm: mean ± standard deviation of 3 runs); a model that cannot fit here alone is not tried here |
+| `ollama cluster bench <model>` | load time and the two llama-bench tests, pp512 (prompt processing) and tg128 (generation), on this machine alone, split, on the worker first and with tensor parallelism, cold and warm (warm: mean ± standard deviation of 3 runs); a model that cannot fit here alone is not tried here |
 | `ollama cluster upgrade [--image ...]` | after an update: recreates Ollama when its image tag points to a newer build and brings the workers to the same image; other settings (also the context limit) stay as they are |
 | `ollama cluster remove` | removes the worker, takes it out of the configuration and recreates the Ollama container exactly as it was before `add` |
 
 `ollama ls` and `ollama ps` stay as they are, so they keep working against an official server; `ollama cluster ls` and `ollama cluster ps` add the cluster view. Both take `--json`.
+
+`ollama cl` is short for `ollama cluster`, e.g. `ollama cl ps`.
 
 Every command explains what it does and changes, with examples: `ollama cluster <command> help`, `ollama cluster help <command>` or `--help`.
 
@@ -89,9 +91,18 @@ The configuration lives in `cluster.json` next to the models (`OLLAMA_MODELS`, o
 | `policy set spread` | every model is split across all machines |
 | `policy set worker-first --from 30` | models of 30 GB and more go to the worker: the whole model when it fits there (nothing of it here), otherwise split with the worker filled first; smaller models stay here |
 | `policy set <any> --keep-free-here 40` | 40 GB of this machine stay free for other software: a model that does not fit in the rest is split, and the split leaves those 40 GB free |
-| `policy model <name> here\|split\|worker` | a rule for one model that wins over the policy; `auto` removes it |
+| `policy tensor on` | every model without a rule of its own runs with tensor parallelism across both machines (see below); `off` goes back to the policy |
+| `policy model <name> here\|split\|worker\|tensor` | a rule for one model that wins over the policy and over `policy tensor`; `auto` removes it |
 
 How it reaches llama-server: a model placed only on the worker starts with `--device RPC0[...]`; memory kept free here is passed as a per-device `--fit-target`. llama-server lists worker devices first and fits layers from the last device, so this machine is filled up to its target and the worker takes the rest. The worker holds one model at a time; when it is busy, a model that would go there loads here as under `auto`. `ollama cluster ps` and the `/cluster` page show `worker` for a model with nothing on this machine.
+
+### Tensor parallelism
+
+Split by layers, the two machines compute one after the other, so a split model is slower than the same model on one machine. With tensor parallelism (llama.cpp `-sm tensor` over RPC, from llama.cpp b11521) both machines compute every layer, each with half of the weights, and exchange partial results directly; generation gets faster than on one machine, also for models that fit here. Turn it on for all models with `ollama cluster policy tensor on`, or for one model with `ollama cluster policy model <name> tensor`; a request can force or forbid it with `"cluster_tensor": true` or `false` in its options.
+
+How it runs: llama.cpp pairs exactly two RPC servers, so the GPU of this machine is served by a second RPC server that Ollama starts next to llama-server and stops with it. It listens on the address of this machine on the direct link (`local_addr` of the worker): through 127.0.0.1 the connection stays on TCP and generation was 4x slower than on one machine (llama3.1:8b 13 tok/s). llama-server gets `--rpc <worker>,<this machine> --device RPC0,RPC1 --split-mode tensor --tensor-split 1,1 -ngl 999 --fit off`. The worker comes first: the first server listens for the second one on its RPC port + 1000 (51052 by default).
+
+When it is used: one GPU here, one worker GPU, the worker free, and half of the model plus a tenth fits on each machine (llama-server cannot fit the context to the memory in this mode, so Ollama checks it before). Otherwise the policy decides, e.g. a 156 GB model with this machine half full is split by layers. A model running this way takes the worker even when it fits here, so another model that needs the worker meanwhile loads here or fails as with any busy worker. `ollama cluster ps` shows `tensor: here ... + <worker> ...`; llama-server reports the split buffers as one device (`Meta()`) with the size each GPU holds, and Ollama counts that size on each machine.
 
 ## Watch it in a browser
 
@@ -212,7 +223,8 @@ Generation and load are the same as on 0.40.3 within the noise, so the merge did
 - When the worker stops while a split model is loaded, the request in flight fails once; the next request loads the model on this machine.
 - Loading over RPC is slower than from a local disk (the weights travel over the link at about 0.5 GB/s).
 - One worker holds one split model at a time.
-- Models are split by layers, so the machines compute one after the other. Tensor parallel (`--split-mode tensor`) is not used: in llama.cpp b11351 (the build measured here) it works over RPC but was 2-3.5x slower than the layer split (llama3.1:8b 19.0 vs 32.2 tok/s, gemma4:31b 4.6 vs 9.8, gpt-oss:120b 12.0 vs 33.1), because every layer synchronizes both machines through RPC calls. `--split-mode row` does not work with RPC devices. See [Tensor parallel in newer llama.cpp](#tensor-parallel-in-newer-llamacpp) below.
+- Models are split by layers unless tensor parallelism is on for them ([Tensor parallelism](#tensor-parallelism)). `--split-mode row` does not work with RPC devices.
+- With tensor parallelism the worker listens for the RPC server of this machine on its RPC port + 1000 on all addresses while the model loads; the firewall rule of `ollama cluster add` covers only the RPC and status ports. Loading takes a little longer than split by layers (DeepSeek-V4-Flash 156 GB: 3 min 44 s against 3 min 30 s).
 - The image is built for DGX Spark (arm64, CUDA 13, compute capability 12.1).
 
 ### Tensor parallel in newer llama.cpp
@@ -228,4 +240,20 @@ Generation and load are the same as on 0.40.3 within the noise, so the merge did
 | `Qwen3.5-397B-A17B` UD-IQ3_XXS | pp512 | does not fit | 310.33 ± 8.20 | 326.61 ± 25.71 | 1.05x vs layer |
 | | tg128 | does not fit | 16.09 ± 0.05 | 18.02 ± 0.06 | 1.12x vs layer |
 
-Generation of dense models gets 1.4-1.7x faster than on one machine; the large MoE model gains 12% over the layer split, since it reads few weights per token. Prompt processing changes little. Several Ollama blobs do not load in llama.cpp b11580 (`gptoss`, `glm4moelite`, and the qwen35moe and gemma4 files of the Ollama library), so they were not measured. Since 2026-10-18 the fork is merged with upstream `main` (llama.cpp b11669), so the code is in the build; using it from `ollama cluster` still needs an RPC server on this machine as well and a placement mode for it. Not done yet.
+Generation of dense models gets 1.4-1.7x faster than on one machine; the large MoE model gains 12% over the layer split, since it reads few weights per token. Prompt processing changes little. Several Ollama blobs do not load in plain llama.cpp b11580 (`gptoss`, `glm4moelite`, and the qwen35moe and gemma4 files of the Ollama library), so they were not measured there; the llama-server of Ollama loads them.
+
+Since 2026-10-18 `ollama cluster` uses it ([Tensor parallelism](#tensor-parallelism)). Measured through Ollama 0.40.4-cluster (llama.cpp b11669) with `ollama cluster bench <model> --only here,split,tensor`, context 32768, warm runs: mean ± standard deviation of 3, tokens/s; the same two DGX Spark (ASUS Ascent GX10) connected 200 Gb/s with RDMA, 2026-10-18. The company traffic ran on the first machine meanwhile, through a separate Ollama, so the numbers carry some noise. `qwen3.8:27b` runs with the MTP draft of the Ollama library model, as Ollama starts it.
+
+| Model | Placement | Load | pp512 warm | tg128 warm | Memory here + worker | tg vs this machine |
+|---|---|---:|---:|---:|---|---:|
+| `qwen3.8:27b` | this machine | 8 s | 689.9 ± 2.1 | 24.4 ± 0.1 | 17.6 + 0 GB | |
+| | split by layers | 23 s | 613.6 ± 31.3 | 21.4 ± 0.3 | 9.4 + 10.4 GB | 0.88x |
+| | tensor parallel | 27 s | 611.1 ± 6.3 | 34.7 ± 0.5 | 8.9 + 9.4 GB | 1.42x |
+| `gpt-oss:120b` | this machine | 18 s | 2216.4 ± 3.5 | 42.7 ± 0.3 | 64.5 + 0 GB | |
+| | split by layers | 1 min 18 s | 2009.9 ± 67.1 | 33.8 ± 0.6 | 31.5 + 33.9 GB | 0.79x |
+| | tensor parallel | 1 min 26 s | 2021.6 ± 42.1 | 58.1 ± 1.6 | 32.4 + 32.4 GB | 1.36x |
+| DeepSeek-V4-Flash-0731 MXFP4, 156 GB | this machine | does not fit | | | | |
+| | split by layers | 3 min 30 s | 500.8 ± 5.3 | 14.5 ± 0.0 | 74.0 + 83.2 GB | |
+| | tensor parallel | 3 min 44 s | 576.8 ± 4.7 | 21.4 ± 0.1 | 79.4 + 79.4 GB | 1.47x vs layers |
+
+Tensor parallel generates 1.4x faster than one machine and 1.5-1.7x faster than the layer split; prompt processing stays at the level of the layer split, 10% below one machine for the models that fit here; loading takes a few seconds more than the layer split. A manual run of llama-server with the same arguments gave llama3.1:8b 57-60 tok/s against 43.3 on one machine. The memory column of the run used a build that counted half of the split buffers; the table shows the corrected values.

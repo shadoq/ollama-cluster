@@ -1479,6 +1479,9 @@ func (runner *runnerRef) needsReload(ctx context.Context, req *LlmRequest) bool 
 	if optsNew.ClusterSplit == nil {
 		optsNew.ClusterSplit = optsExisting.ClusterSplit
 	}
+	if optsNew.ClusterTensor == nil {
+		optsNew.ClusterTensor = optsExisting.ClusterTensor
+	}
 	if optsNew.NumGPU < 0 {
 		optsExisting.NumGPU = -1
 		optsNew.NumGPU = -1
