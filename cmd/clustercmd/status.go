@@ -201,10 +201,19 @@ func runDoctor(cmd *cobra.Command, fix bool) error {
 
 	if m.container != nil {
 		logs := containerLogs(ctx, m.container.name(), "24h")
-		skipped := strings.Count(logs, "cluster worker skipped") + strings.Count(logs, "cluster worker unavailable at model start")
-		if skipped > 0 {
-			r.warn("Fallbacks", fmt.Sprintf("%d in the last 24 h", skipped), "Models loaded on this machine only because a worker was not usable. Ollama kept working.", "docker logs "+m.container.name()+" 2>&1 | grep 'cluster worker'")
-		} else {
+		// "skipped" is logged when the worker becomes unusable (also for a few
+		// seconds during an upgrade, with no model loading); only "unavailable
+		// at model start" means that a load really fell back to this machine.
+		unusable := strings.Count(logs, "cluster worker skipped")
+		fellBack := strings.Count(logs, "cluster worker unavailable at model start")
+		fix := "docker logs " + m.container.name() + " 2>&1 | grep 'cluster worker'"
+		switch {
+		case fellBack > 0:
+			r.warn("Fallbacks", fmt.Sprintf("%d in the last 24 h, worker unusable %d times", fellBack, unusable), "Models loaded on this machine only because the worker failed when they started. Ollama kept working.", fix)
+		case unusable > 0:
+			r.info("Fallbacks", fmt.Sprintf("no failed start in the last 24 h; worker unusable %d times (upgrades and restarts count too)", unusable))
+			r.explain("While the worker is unusable, models that need it load on this machine only. Details: "+fix, "")
+		default:
 			r.ok("Fallbacks", "none in the last 24 h")
 		}
 	}
