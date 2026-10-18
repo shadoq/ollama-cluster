@@ -26,7 +26,7 @@ The same commands also keep GGUF models from Hugging Face as plain repository co
 The official image has no RPC module, so the cluster needs its own build. On a DGX Spark with the CUDA 13 toolkit, cmake, Go and `libibverbs-dev`:
 
 ```sh
-VERSION=0.40.3-cluster scripts/build_cluster_image.sh   # -> ollama-cluster:0.40.3-cluster
+VERSION=0.40.4-cluster scripts/build_cluster_image.sh   # -> ollama-cluster:0.40.4-cluster
 ```
 
 The script builds llama-server with the RPC backend and `ggml-rpc-server` (RDMA through libibverbs), the CUDA backend for compute capability 12.1, and the Ollama binary, then packs them with `Dockerfile.cluster`.
@@ -34,7 +34,7 @@ The script builds llama-server with the RPC backend and `ggml-rpc-server` (RDMA 
 Install the command on the host (the commands run on the host, also when Ollama is in Docker):
 
 ```sh
-id=$(docker create ollama-cluster:0.40.3-cluster)
+id=$(docker create ollama-cluster:0.40.4-cluster)
 docker cp "$id":/usr/bin/ollama ~/.local/bin/ollama && docker rm "$id"
 ```
 
@@ -42,7 +42,7 @@ docker cp "$id":/usr/bin/ollama ~/.local/bin/ollama && docker rm "$id"
 
 ```sh
 ollama cluster init                                   # checks only, changes nothing
-ollama cluster add user@10.100.48.2 --image ollama-cluster:0.40.3-cluster
+ollama cluster add user@10.100.48.2 --image ollama-cluster:0.40.4-cluster
 ```
 
 `add` checks both machines before changing anything, copies the image to the worker (once per version), starts the worker container (`--network host --device /dev/infiniband --ulimit memlock=-1`), and recreates the Ollama container with what the cluster needs:
@@ -192,7 +192,7 @@ A model on the worker alone is always slower than the same model here: slow dens
 - When the worker stops while a split model is loaded, the request in flight fails once; the next request loads the model on this machine.
 - Loading over RPC is slower than from a local disk (the weights travel over the link at about 0.5 GB/s).
 - One worker holds one split model at a time.
-- Models are split by layers, so the machines compute one after the other. Tensor parallel (`--split-mode tensor`) is not used: in llama.cpp b11351 (this build) it works over RPC but was 2-3.5x slower than the layer split (llama3.1:8b 19.0 vs 32.2 tok/s, gemma4:31b 4.6 vs 9.8, gpt-oss:120b 12.0 vs 33.1), because every layer synchronizes both machines through RPC calls. `--split-mode row` does not work with RPC devices. See [Tensor parallel in newer llama.cpp](#tensor-parallel-in-newer-llamacpp) below.
+- Models are split by layers, so the machines compute one after the other. Tensor parallel (`--split-mode tensor`) is not used: in llama.cpp b11351 (the build measured here) it works over RPC but was 2-3.5x slower than the layer split (llama3.1:8b 19.0 vs 32.2 tok/s, gemma4:31b 4.6 vs 9.8, gpt-oss:120b 12.0 vs 33.1), because every layer synchronizes both machines through RPC calls. `--split-mode row` does not work with RPC devices. See [Tensor parallel in newer llama.cpp](#tensor-parallel-in-newer-llamacpp) below.
 - The image is built for DGX Spark (arm64, CUDA 13, compute capability 12.1).
 
 ### Tensor parallel in newer llama.cpp
@@ -208,4 +208,4 @@ A model on the worker alone is always slower than the same model here: slow dens
 | `Qwen3.5-397B-A17B` UD-IQ3_XXS | pp512 | does not fit | 310.33 ± 8.20 | 326.61 ± 25.71 | 1.05x vs layer |
 | | tg128 | does not fit | 16.09 ± 0.05 | 18.02 ± 0.06 | 1.12x vs layer |
 
-Generation of dense models gets 1.4-1.7x faster than on one machine; the large MoE model gains 12% over the layer split, since it reads few weights per token. Prompt processing changes little. Several Ollama blobs do not load in llama.cpp b11580 (`gptoss`, `glm4moelite`, and the qwen35moe and gemma4 files of the Ollama library), so they were not measured. Using it in this fork needs a rebase on Ollama 0.40.4 and an RPC server on this machine as well; not done yet.
+Generation of dense models gets 1.4-1.7x faster than on one machine; the large MoE model gains 12% over the layer split, since it reads few weights per token. Prompt processing changes little. Several Ollama blobs do not load in llama.cpp b11580 (`gptoss`, `glm4moelite`, and the qwen35moe and gemma4 files of the Ollama library), so they were not measured. Since 2026-10-18 the fork is merged with upstream `main` (llama.cpp b11669), so the code is in the build; using it from `ollama cluster` still needs an RPC server on this machine as well and a placement mode for it. Not done yet.

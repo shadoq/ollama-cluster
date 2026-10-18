@@ -4,17 +4,31 @@
   </a>
 </p>
 
-# Ollama
+# ollama-cluster: one Ollama on two machines
 
-Start building with open models. Access the latest releases locally or in the cloud with complete privacy.
+A fork of [Ollama](https://github.com/ollama/ollama) that adds `ollama cluster`: one Ollama uses the GPU memory of a second machine through the llama.cpp RPC backend, keeps one address and the same API, and splits only the models that do not fit on the first machine. It also keeps GGUF models from Hugging Face as plain repository copies, shows models and load with `ollama cluster ls` / `ps`, lets you choose where models go (`ollama cluster policy`), and serves a live page at `http://<host>:11434/cluster`. Full description: [docs/cluster.md](docs/cluster.md).
 
-## ollama-cluster: one Ollama on two machines
+Built and tested on two NVIDIA DGX Spark (ASUS Ascent GX10) connected with a direct 200 Gb/s cable. The fork follows upstream `main`; the current build is Ollama 0.40.4 plus upstream changes up to 2026-10-17, with llama.cpp b11669.
 
-This fork adds `ollama cluster`: one Ollama uses the GPU memory of a second machine through the llama.cpp RPC backend, keeps one address and the same API, and splits only the models that do not fit on the first machine. It also keeps GGUF models from Hugging Face as plain repository copies, shows models and load with `ollama cluster ls` / `ps`, lets you choose where models go (`ollama cluster policy`), and serves a live page at `http://<host>:11434/cluster`. Full description: [docs/cluster.md](docs/cluster.md).
+> **Note:** the "Download" section further down is the upstream Ollama README. Those installers and the `ollama/ollama` Docker image install the official Ollama, **without** the cluster. To get `ollama cluster`, build the image from this repository as below.
+
+### Quick start
+
+On a DGX Spark with the CUDA 13 toolkit, cmake, Go and `libibverbs-dev`, from the `cluster` branch:
+
+```sh
+VERSION=0.40.4-cluster scripts/build_cluster_image.sh      # -> ollama-cluster:0.40.4-cluster
+id=$(docker create ollama-cluster:0.40.4-cluster)
+docker cp "$id":/usr/bin/ollama ~/.local/bin/ollama && docker rm "$id"
+ollama cluster init                                        # checks only, changes nothing
+ollama cluster add user@10.100.48.2 --image ollama-cluster:0.40.4-cluster
+```
+
+Requirements, what `add` changes, and how to undo it (`ollama cluster remove`): [docs/cluster.md](docs/cluster.md#requirements).
 
 ### Measured
 
-Two NVIDIA DGX Spark (ASUS Ascent GX10, 128 GB unified memory each) connected with a 200 Gb/s direct cable, Ollama 0.40.3-cluster with llama.cpp b11351, context 32768, 256 generated tokens, warm run; "load" is the cold start. "Split" forces the split across both machines, "worker only" puts the whole model on the second machine.
+Two NVIDIA DGX Spark (ASUS Ascent GX10, 128 GB unified memory each) connected with a 200 Gb/s direct cable, measured on Ollama 0.40.3-cluster with llama.cpp b11351, context 32768, 256 generated tokens, warm run; "load" is the cold start. "Split" forces the split across both machines, "worker only" puts the whole model on the second machine.
 
 | Model | Size | this machine | split | worker only |
 |---|---:|---:|---:|---:|
@@ -23,7 +37,15 @@ Two NVIDIA DGX Spark (ASUS Ascent GX10, 128 GB unified memory each) connected wi
 | `gpt-oss:120b` | 65.4 GB | 41.7 tok/s, 19 s | 33.1 tok/s, 1 min 22 s | 36.5 tok/s, 2 min 54 s |
 | Qwen3.5-397B-A17B UD-IQ3_XXS | 141.3 GB | does not fit | 15.3 tok/s, 3 min 8 s | does not fit |
 
-The second machine adds room, not speed: a model that fits on one machine is faster there, which is why Ollama splits only what does not fit. Full tables for 22 models and how they were measured: [docs/cluster.md](docs/cluster.md#measured-on-two-dgx-spark-asus-ascent-gx10-connected-200-gbs). `ollama cluster bench <model>` reports the two tests of llama-bench, pp512 and tg128. Tensor parallel from newer llama.cpp (not in this build yet) generated 1.4-1.7x faster than one machine for dense models on the same pair: [details](docs/cluster.md#tensor-parallel-in-newer-llamacpp).
+The second machine adds room, not speed: a model that fits on one machine is faster there, which is why Ollama splits only what does not fit. Full tables for 22 models and how they were measured: [docs/cluster.md](docs/cluster.md#measured-on-two-dgx-spark-asus-ascent-gx10-connected-200-gbs). `ollama cluster bench <model>` reports the two tests of llama-bench, pp512 and tg128. Tensor parallel from newer llama.cpp (the llama.cpp in this build has it, `ollama cluster` does not use it yet) generated 1.4-1.7x faster than one machine for dense models on the same pair: [details](docs/cluster.md#tensor-parallel-in-newer-llamacpp).
+
+---
+
+*Below: the upstream Ollama README.*
+
+# Ollama
+
+Start building with open models. Access the latest releases locally or in the cloud with complete privacy.
 
 ## Download
 
