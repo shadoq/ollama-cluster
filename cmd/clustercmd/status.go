@@ -209,9 +209,9 @@ func runDoctor(cmd *cobra.Command, fix bool) error {
 		fix := "docker logs " + m.container.name() + " 2>&1 | grep 'cluster worker'"
 		switch {
 		case fellBack > 0:
-			r.warn("Fallbacks", fmt.Sprintf("%d in the last 24 h, worker unusable %d times", fellBack, unusable), "Models loaded on this machine only because the worker failed when they started. Ollama kept working.", fix)
+			r.warn("Fallbacks", fmt.Sprintf("%d in the last 24 h, worker unusable: %s", fellBack, times(unusable)), "Models loaded on this machine only because the worker failed when they started. Ollama kept working.", fix)
 		case unusable > 0:
-			r.info("Fallbacks", fmt.Sprintf("no failed start in the last 24 h; worker unusable %d times (upgrades and restarts count too)", unusable))
+			r.info("Fallbacks", fmt.Sprintf("no failed start in the last 24 h; worker unusable %s (upgrades and restarts count too)", times(unusable)))
 			r.explain("While the worker is unusable, models that need it load on this machine only. Details: "+fix, "")
 		default:
 			r.ok("Fallbacks", "none in the last 24 h")
@@ -332,4 +332,12 @@ echo "containers=$(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep
 			r.info("Firewall", "not checked (sudo on the worker asks for a password)")
 		}
 	}
+}
+
+// times formats a count of occurrences: "1 time", "3 times".
+func times(n int) string {
+	if n == 1 {
+		return "1 time"
+	}
+	return strconv.Itoa(n) + " times"
 }
