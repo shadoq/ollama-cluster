@@ -521,8 +521,8 @@ func workerState(c cluster.WorkerCheck) string {
 	if c.Busy {
 		state = "holds a split model"
 	}
-	if c.Status != nil && c.Status.Transport != "" {
-		state += ", " + c.Status.Transport
+	if t := c.Status.TransportLabel(); t != "" {
+		state += ", " + t
 	}
 	return state
 }

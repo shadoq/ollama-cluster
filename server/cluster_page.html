@@ -143,7 +143,8 @@ function renderMachines(st) {
       if (w) {
         state = !w.usable ? `<span class="bad">not used: ${esc(w.problem)}</span>`
           : w.busy ? `<span class="warn">holds a split model</span>` : `<span class="ok">idle, ready</span>`;
-        if (w.status && w.status.transport) state += ` <span class="muted">- ${esc(w.status.transport)}</span>`;
+        if (w.status && w.status.link) state += ` <span class="muted">- ${esc(w.status.link)}</span>`;
+        else if (w.status && w.status.transport) state += ` <span class="muted">- ${esc(w.status.transport)}, no client yet</span>`;
       }
     } else {
       state = `<span class="ok">this machine</span>`;

@@ -193,6 +193,7 @@ func (w *Worker) runOnce(ctx context.Context) error {
 // readOutput forwards the RPC server output to the log and records the
 // transport it reports. It returns the last non-empty line.
 func (w *Worker) readOutput(r io.Reader) (lastLine string) {
+	var link linkState
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -206,8 +207,59 @@ func (w *Worker) readOutput(r io.Reader) (lastLine string) {
 			w.status.Transport = strings.TrimSpace(value)
 			w.mu.Unlock()
 		}
+		if link.update(line) {
+			w.mu.Lock()
+			w.status.Link = link.label
+			w.mu.Unlock()
+		}
 	}
 	return lastLine
+}
+
+// rdmaProbed matches the RPC server line printed when a client offers RDMA:
+//
+//	RDMA probed: dev=rocep1s0f0 gid=3 RoCEv2 qpn=4812 inline=316
+var rdmaProbed = regexp.MustCompile(`^RDMA probed: dev=(\S+) gid=\d+\s*(\S*)\s+qpn=`)
+
+// rdmaActivated matches the line printed when the connection switched to RDMA:
+//
+//	RDMA activated: qpn=4812->4927 mtu=1024 rx_depth=24
+var rdmaActivated = regexp.MustCompile(`^RDMA activated: .*\bmtu=(\d+)`)
+
+// linkState follows the per-connection transport negotiation in the RPC
+// server output. A connection starts on TCP and moves to RDMA only when the
+// server prints "RDMA activated".
+type linkState struct {
+	dev, mode string
+	label     string
+}
+
+// update reads one output line and reports whether the label changed.
+func (l *linkState) update(line string) bool {
+	line = strings.TrimSpace(line)
+	before := l.label
+	switch {
+	case line == "Accepted client connection":
+		l.dev, l.mode = "", ""
+		l.label = "TCP"
+	case rdmaProbed.MatchString(line):
+		m := rdmaProbed.FindStringSubmatch(line)
+		l.dev, l.mode = m[1], m[2]
+	case rdmaActivated.MatchString(line):
+		m := rdmaActivated.FindStringSubmatch(line)
+		parts := []string{}
+		if l.mode != "" {
+			parts = append(parts, l.mode)
+		}
+		if l.dev != "" {
+			parts = append(parts, l.dev)
+		}
+		parts = append(parts, "MTU "+m[1])
+		l.label = "RDMA (" + strings.Join(parts, ", ") + ")"
+	case strings.HasPrefix(line, "RDMA activate failed"):
+		l.label = "TCP (RDMA activation failed)"
+	}
+	return l.label != before
 }
 
 // deviceLine matches llama-server --list-devices output:

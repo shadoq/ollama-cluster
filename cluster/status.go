@@ -44,6 +44,12 @@ type WorkerStatus struct {
 	// "TCP (RDMA auto-negotiate enabled)".
 	Transport string `json:"transport,omitempty"`
 
+	// Link is the transport the RPC server negotiated with the last
+	// llama-server that connected, e.g. "RDMA (RoCEv2, rocep1s0f0, MTU 1024)"
+	// or "TCP"; empty until a client connects. Transport only says what the
+	// server can offer, since RDMA is negotiated per connection.
+	Link string `json:"link,omitempty"`
+
 	Devices []RemoteDevice `json:"devices"`
 
 	// GPU is the GPU load of the worker machine (any process, not only RPC).
@@ -52,6 +58,20 @@ type WorkerStatus struct {
 	StartedAt time.Time `json:"started_at"`
 	Restarts  int       `json:"restarts,omitempty"`
 	LastError string    `json:"last_error,omitempty"`
+}
+
+// TransportLabel is the transport to show for the worker: the one negotiated
+// with the last client, or what the server offers while none has connected.
+func (s *WorkerStatus) TransportLabel() string {
+	switch {
+	case s == nil:
+		return ""
+	case s.Link != "":
+		return s.Link
+	case s.Transport != "":
+		return s.Transport + ", no client yet"
+	}
+	return ""
 }
 
 // RemoteDevice is a device exposed by a worker.
@@ -237,7 +257,7 @@ func logTransition(c WorkerCheck) {
 			free += d.FreeMemory
 		}
 		slog.Info("cluster worker available", "worker", c.Worker.Label(), "endpoint", key,
-			"transport", c.Status.Transport, "total", format.HumanBytes2(total), "available", format.HumanBytes2(free))
+			"transport", c.Status.TransportLabel(), "total", format.HumanBytes2(total), "available", format.HumanBytes2(free))
 	}
 }
 

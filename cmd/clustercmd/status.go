@@ -61,7 +61,7 @@ func printStatus(m *mainOllama) {
 			if c.Busy {
 				state = "busy (a model is loaded on it)"
 			}
-			fmt.Printf("  worker %-19s %s, %s, %s\n", c.Worker.Label(), c.Worker.Endpoint(), c.Status.Transport, state)
+			fmt.Printf("  worker %-19s %s, %s, %s\n", c.Worker.Label(), c.Worker.Endpoint(), c.Status.TransportLabel(), state)
 		}
 	}
 	if len(st.Config.Workers) == 0 {
@@ -270,8 +270,12 @@ func doctorWorker(ctx context.Context, r *report, m *mainOllama, c cluster.Worke
 	}
 	if c.Status != nil {
 		switch {
+		case strings.HasPrefix(c.Status.Link, "RDMA"):
+			r.ok("Transport", c.Status.Link+", last connection")
+		case c.Status.Link != "":
+			r.warn("Transport", c.Status.Link+", last connection", "The worker offers RDMA, but the last connection stayed on TCP: model loading and generation are slower.", "check /dev/infiniband and memlock on both machines; docker logs of the worker show the RDMA lines")
 		case strings.Contains(strings.ToUpper(c.Status.Transport), "RDMA"):
-			r.ok("Transport", c.Status.Transport)
+			r.ok("Transport", c.Status.TransportLabel())
 		case c.Status.Transport != "":
 			r.warn("Transport", c.Status.Transport, "The link runs without RDMA, model loading and generation are slower.", "check /dev/infiniband and memlock on the worker; ollama cluster upgrade")
 		}

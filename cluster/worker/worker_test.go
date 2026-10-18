@@ -18,6 +18,28 @@ func TestParseProcNetTCP(t *testing.T) {
 	}
 }
 
+func TestLinkState(t *testing.T) {
+	var l linkState
+	steps := []struct {
+		line string
+		want string
+	}{
+		{"  transport      : TCP (RDMA auto-negotiate enabled)", ""},
+		{"Accepted client connection", "TCP"},
+		{"RDMA probed: dev=rocep1s0f0 gid=3 RoCEv2 qpn=4812 inline=316", "TCP"},
+		{"RDMA activated: qpn=4812->4927 mtu=1024 rx_depth=24", "RDMA (RoCEv2, rocep1s0f0, MTU 1024)"},
+		{"Client connection closed", "RDMA (RoCEv2, rocep1s0f0, MTU 1024)"},
+		{"Accepted client connection", "TCP"},
+		{"RDMA activate failed, staying on TCP", "TCP (RDMA activation failed)"},
+	}
+	for _, s := range steps {
+		l.update(s.line)
+		if l.label != s.want {
+			t.Fatalf("after %q: got %q, want %q", s.line, l.label, s.want)
+		}
+	}
+}
+
 func TestParseDevices(t *testing.T) {
 	out := `Available devices:
   CUDA0: NVIDIA GB10 (124546 MiB, 110000 MiB free)

@@ -78,3 +78,20 @@ func TestCheckAfterRelease(t *testing.T) {
 		}
 	})
 }
+
+func TestTransportLabel(t *testing.T) {
+	cases := []struct {
+		st   *WorkerStatus
+		want string
+	}{
+		{nil, ""},
+		{&WorkerStatus{}, ""},
+		{&WorkerStatus{Transport: "TCP (RDMA auto-negotiate enabled)"}, "TCP (RDMA auto-negotiate enabled), no client yet"},
+		{&WorkerStatus{Transport: "TCP (RDMA auto-negotiate enabled)", Link: "RDMA (RoCEv2, rocep1s0f0, MTU 1024)"}, "RDMA (RoCEv2, rocep1s0f0, MTU 1024)"},
+	}
+	for _, c := range cases {
+		if got := c.st.TransportLabel(); got != c.want {
+			t.Errorf("TransportLabel(%+v) = %q, want %q", c.st, got, c.want)
+		}
+	}
+}
