@@ -319,7 +319,7 @@ func printRows(m *mainOllama, rows []modelRow, showFiles bool) {
 		}
 	}
 	local, remote := memoryTotals(m.status)
-	fmt.Printf("\n%d model(s); data on disk: %s in the Ollama store, %s in repository copies.\n", len(rows), humanBytes(uint64(store)), humanBytes(uint64(copies)))
+	fmt.Printf("\n%d model(s); data on disk: %s in the Ollama store, %s in locations.\n", len(rows), humanBytes(uint64(store)), humanBytes(uint64(copies)))
 	fmt.Println("*  loaded now (details: ollama cluster ps)")
 	runs := fmt.Sprintf("RUNS  estimate from the file size + %.0f%%: here = fits this machine (%s)", fitMargin*100, humanBytes(local))
 	if remote > 0 {
@@ -328,7 +328,7 @@ func printRows(m *mainOllama, rows []modelRow, showFiles bool) {
 		runs += ", split = needs a second machine (none attached)"
 	}
 	fmt.Println(runs)
-	fmt.Println("FILES Ollama store = blobs in OLLAMA_MODELS; a path = repository copy in that location, linked into Ollama (ollama cluster models)")
+	fmt.Println("FILES Ollama store = blobs in OLLAMA_MODELS; a path = files in that location, linked into Ollama: a repository copy (hf, ollama cluster models) or moved with ollama cluster mv")
 	if len(rows) > 0 && rows[0].Files == "unknown" {
 		fmt.Println("      unknown = the running Ollama is an older build that does not report files; update it: ollama cluster upgrade")
 	}

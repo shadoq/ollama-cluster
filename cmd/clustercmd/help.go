@@ -11,7 +11,7 @@ import (
 var commandGroups = []*cobra.Group{
 	{ID: "machines", Title: "Second machine:"},
 	{ID: "inspect", Title: "Look and check:"},
-	{ID: "copies", Title: "Model copies from Hugging Face:"},
+	{ID: "copies", Title: "Model files and copies from Hugging Face:"},
 }
 
 type helpText struct {
@@ -376,6 +376,34 @@ only then are the files removed. If a link cannot be switched or still
 points into the copy, the copy is put back and nothing is deleted.`,
 		example: `  ollama cluster drop unsloth/Qwen3-4B-GGUF /mnt/second-disk
   ollama cluster drop unsloth/Qwen3-4B-GGUF /mnt/second-disk --yes`,
+	},
+	"mv": {
+		group: "copies",
+		long: `Move the files of models to another location, or back to the Ollama store,
+and leave links in Ollama, so a model that is rarely used takes no space on
+the fast disk. The model keeps its name and works as before; it loads from
+the location, so that disk must be mounted for it to run.
+
+  - <location> is a load location (ollama cluster locations); an archive
+    location is refused, Ollama never loads from it. 'store' moves the
+    files back into OLLAMA_MODELS.
+  - Only the large files move (weights, projector, draft); template,
+    parameters and license stay in the store. The files go to
+    <location>/ollama/blobs/ under their sha256 names.
+  - Ollama does the move itself (it owns the store, also in Docker). Each
+    file is copied as <name>.part, checked against its sha256 while it is
+    written and flushed to disk, then the blob becomes a link to it, and
+    only then is the old file removed. Within one disk the file is hard
+    linked instead of copied. An interrupted move changes nothing.
+  - A file shared with other models moves for all of them; the plan names
+    them. Files of Hugging Face repository copies stay where they are
+    (ollama cluster copy / drop).
+  - A loaded model keeps running: it holds the old file open.
+
+Models deleted with 'ollama rm' leave their moved files in the location.`,
+		example: `  ollama cluster mv qwen3.5:9b /mnt/second-disk/models
+  ollama cl mv qwen3.5:9b gemma4:12b llama3.1:8b /mnt/second-disk/models --yes
+  ollama cl mv qwen3.5:9b store`,
 	},
 	"import": {
 		group: "copies",

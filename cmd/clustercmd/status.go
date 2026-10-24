@@ -185,6 +185,14 @@ func runDoctor(cmd *cobra.Command, fix bool) error {
 		case len(links.Links) > 0:
 			r.ok("Model links", fmt.Sprintf("%d, all reachable", len(links.Links)))
 		}
+		if unused, size := unusedMoved(&st.Config, links.Links); len(unused) > 0 {
+			// Ollama in Docker wrote them as root
+			rm := "rm "
+			if m.container != nil {
+				rm = "sudo rm "
+			}
+			r.warn("Moved files", fmt.Sprintf("%d unused, %s", len(unused), humanBytes(uint64(size))), "No model uses these files moved by 'ollama cluster mv' anymore (the model was removed with 'ollama rm').", rm+strings.Join(unused, " "))
+		}
 	}
 
 	if len(st.Config.Workers) == 0 {

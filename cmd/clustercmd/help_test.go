@@ -42,7 +42,8 @@ func TestHelpEverywhere(t *testing.T) {
 		"drop help":          "--force",
 		"ls help":            "CAPABILITIES",
 		"ps --help":          "UNLOADS",
-		"help":               "Model copies from Hugging Face:",
+		"help":               "Model files and copies from Hugging Face:",
+		"mv help":            "ollama/blobs",
 	}
 	for args, want := range cases {
 		root := Command()

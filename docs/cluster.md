@@ -69,6 +69,7 @@ sudo iptables -I INPUT ! -i lo -p tcp -m multiport --dports 50052,50053 ! -s 10.
 | `ollama cluster ps` | loaded models with memory per machine, context in use, parallel slots, active requests and when they unload; free memory and state of each machine |
 | `ollama cluster policy` | shows or sets where models go: `policy set auto\|spread\|worker-first [--from GB] [--keep-free-here GB]`, `policy tensor on\|off`, `policy model <name> here\|split\|worker\|tensor\|auto` |
 | `ollama cluster doctor [--fix]` | checks the container, locations, model links, worker, transport, firewall and the fallbacks of the last 24 h; `--fix` relinks models to the best copy |
+| `ollama cluster mv <model>... <location\|store>` | moves the files of rarely used models to another location and leaves links, so they free the fast disk and keep working; `store` brings them back ([Move models to another disk](#move-models-to-another-disk)) |
 | `ollama cluster bench <model>` | load time and the two llama-bench tests, pp512 (prompt processing) and tg128 (generation), on this machine alone, split, on the worker first and with tensor parallelism, cold and warm (warm: mean ± standard deviation of 3 runs); a model that cannot fit here alone is not tried here |
 | `ollama cluster upgrade [--image ...]` | after an update: recreates Ollama when its image tag points to a newer build and brings the workers to the same image; other settings (also the context limit) stay as they are |
 | `ollama cluster remove` | removes the worker, takes it out of the configuration and recreates the Ollama container exactly as it was before `add` |
@@ -116,7 +117,23 @@ When it is used: one GPU here, one worker GPU, the worker free, and half of the 
 
 The same data as JSON: `GET /api/cluster/status` and `GET /api/cluster/activity`. Everything is kept in memory only (the last 200 requests and 300 log entries) and starts empty after a restart. The page and the endpoints have no authentication, like the rest of the Ollama API, so they show model names and client addresses to anyone who can reach the port.
 
-Requests that change something are accepted only from the machine Ollama runs on: `PUT /api/cluster/config`, `POST /api/cluster/link` and `POST /api/cluster/relink` (the `ollama cluster` commands use them). The peer address of the connection must be a loopback address, the Host header an IP address, `localhost` or the machine name, and a request from a browser (with an `Origin` header) is refused. When Ollama runs in Docker on a bridge network (before `add` switches it to host networking), the host reaches it from the bridge gateway: allow that address with `OLLAMA_CLUSTER_ADMIN_ADDRS=172.17.0.1` in the container. Every saved configuration is checked: worker addresses must be IP addresses, the SSH target `user@host`, locations absolute paths outside system directories. Fields that come from clients (path, model, client address) are cut to 256 characters in the request log.
+Requests that change something are accepted only from the machine Ollama runs on: `PUT /api/cluster/config`, `POST /api/cluster/link`, `POST /api/cluster/relink` and `POST /api/cluster/move` (the `ollama cluster` commands use them). The peer address of the connection must be a loopback address, the Host header an IP address, `localhost` or the machine name, and a request from a browser (with an `Origin` header) is refused. When Ollama runs in Docker on a bridge network (before `add` switches it to host networking), the host reaches it from the bridge gateway: allow that address with `OLLAMA_CLUSTER_ADMIN_ADDRS=172.17.0.1` in the container. Every saved configuration is checked: worker addresses must be IP addresses, the SSH target `user@host`, locations absolute paths outside system directories. Fields that come from clients (path, model, client address) are cut to 256 characters in the request log.
+
+## Move models to another disk
+
+Models pulled from the Ollama library live in the Ollama store (`OLLAMA_MODELS`). A model that is rarely used can move to another location and keep working:
+
+```sh
+ollama cluster locations add /mnt/second-disk/models
+ollama cl mv qwen3.5:9b gemma4:12b /mnt/second-disk/models
+ollama cl mv qwen3.5:9b store                              # back to the Ollama store
+```
+
+- Only the large files move (weights, projector, draft); template, parameters and license stay in the store. They go to `<location>/ollama/blobs/sha256-<sum>`, and the blob in the store becomes a link to them, like the links to repository copies. `ollama cluster ls --files` shows where each file is.
+- Ollama does the move itself (`POST /api/cluster/move`), so it works also when Ollama runs in Docker and owns the store. Each file is written as `.part`, checked against its sha256 while it is copied and flushed to disk; only then the blob is switched to the link and the old file is removed. Within one disk (and one mount in Docker) the file is hard linked instead of copied. An interrupted move changes nothing.
+- The target must be a load location; an archive location is refused because Ollama never loads from it. The model then loads from that disk, so it must be mounted when the model runs; when it is not, the load fails with the name of the missing file, as for repository copies.
+- A file shared by several models (e.g. after `ollama cp`) moves for all of them; `mv` names them before it asks. Files of Hugging Face repository copies stay where they are (`copy` and `drop` manage them). A loaded model keeps running from the file it has open.
+- `ollama rm` removes only the link: the moved file stays in the location. `ollama cluster doctor` lists such unused files with the command that deletes them.
 
 ## Model copies from Hugging Face
 

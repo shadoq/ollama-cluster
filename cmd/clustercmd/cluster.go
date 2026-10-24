@@ -70,6 +70,7 @@ Every command explains itself: 'ollama cluster <command> help' or
 		modelsCmd(),
 		copyCmd(),
 		dropCmd(),
+		mvCmd(),
 		importCmd(),
 		workerCmd(),
 	)
@@ -152,6 +153,50 @@ func (a *apiClient) do(ctx context.Context, method, path string, body, out any) 
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)
+	}
+	return nil
+}
+
+// stream sends a request whose answer is one JSON object per line and calls
+// fn for each; a line with an "error" field ends it with that error.
+func (a *apiClient) stream(ctx context.Context, method, path string, body any, fn func(json.RawMessage) error) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, a.base+path, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
+	for sc.Scan() {
+		line := sc.Bytes()
+		var e struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(line, &e) == nil && e.Error != "" {
+			return &apiError{Status: resp.StatusCode, Msg: e.Error}
+		}
+		if resp.StatusCode >= 300 {
+			return &apiError{Status: resp.StatusCode, Msg: strings.TrimSpace(string(line))}
+		}
+		if err := fn(json.RawMessage(line)); err != nil {
+			return err
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	if resp.StatusCode >= 300 {
+		return &apiError{Status: resp.StatusCode, Msg: resp.Status}
 	}
 	return nil
 }

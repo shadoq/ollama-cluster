@@ -36,6 +36,7 @@ func (s *Server) registerClusterRoutes(r *gin.Engine) {
 	r.POST("/api/cluster/link", clusterLocalOnly, s.ClusterLinkHandler)
 	r.GET("/api/cluster/links", s.ClusterLinksHandler)
 	r.POST("/api/cluster/relink", clusterLocalOnly, s.ClusterRelinkHandler)
+	r.POST("/api/cluster/move", clusterLocalOnly, s.ClusterMoveHandler)
 	r.GET("/api/cluster/models", s.ClusterModelsHandler)
 	r.GET("/api/cluster/activity", s.ClusterActivityHandler)
 	r.GET("/api/cluster/history", s.ClusterHistoryHandler)
@@ -241,6 +242,73 @@ func (s *Server) ClusterRelinkHandler(c *gin.Context) {
 		changes = []cluster.RelinkResult{}
 	}
 	c.JSON(http.StatusOK, cluster.RelinkResponse{Changes: changes})
+}
+
+// clusterMoveMu lets one move run at a time: two moves of models sharing a
+// blob would copy it twice and remove each other's files.
+var clusterMoveMu sync.Mutex
+
+// ClusterMoveHandler moves the large blobs of a model to a location, or back
+// to the Ollama store, and streams the progress.
+func (s *Server) ClusterMoveHandler(c *gin.Context) {
+	var req cluster.MoveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	name := model.ParseName(req.Model)
+	if !name.IsValid() {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid model name " + req.Model})
+		return
+	}
+	digests, err := manifest.ReferencedBlobDigestsForName(name)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "model " + req.Model + " not found"})
+		return
+	}
+	cfg, err := cluster.LoadConfig()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if !clusterMoveMu.TryLock() {
+		c.JSON(http.StatusConflict, gin.H{"error": "another move is running"})
+		return
+	}
+
+	ch := make(chan any)
+	go func() {
+		defer clusterMoveMu.Unlock()
+		defer close(ch)
+		ctx := c.Request.Context()
+		send := func(v any) {
+			select {
+			case ch <- v:
+			case <-ctx.Done():
+			}
+		}
+		for _, d := range digests {
+			b := blobFile(d)
+			if b.Size < cluster.MinMoveSize && b.OK {
+				continue
+			}
+			send(cluster.MoveProgress{Status: "moving", Digest: d, Total: b.Size})
+			last := time.Now()
+			res, err := cluster.MoveBlob(ctx, cfg, d, req.To, func(done int64) {
+				if time.Since(last) >= time.Second {
+					last = time.Now()
+					send(cluster.MoveProgress{Status: "moving", Digest: d, Total: b.Size, Completed: done})
+				}
+			})
+			if err != nil {
+				send(gin.H{"error": err.Error()})
+				return
+			}
+			send(cluster.MoveProgress{Status: "moved", Digest: d, Total: res.Size, Completed: res.Size, Result: &res})
+		}
+		send(cluster.MoveProgress{Status: "success"})
+	}()
+	streamResponse(c, ch)
 }
 
 // ClusterModelsHandler lists the blobs of every model and where their data

@@ -6,7 +6,7 @@
 
 # ollama-cluster: one Ollama on two machines
 
-A fork of [Ollama](https://github.com/ollama/ollama) that adds `ollama cluster`: one Ollama uses the GPU memory of a second machine through the llama.cpp RPC backend, keeps one address and the same API, and splits only the models that do not fit on the first machine. It also keeps GGUF models from Hugging Face as plain repository copies, shows models and load with `ollama cluster ls` / `ps`, lets you choose where models go (`ollama cluster policy`), and serves a live page at `http://<host>:11434/cluster`. Full description: [docs/cluster.md](docs/cluster.md).
+A fork of [Ollama](https://github.com/ollama/ollama) that adds `ollama cluster`: one Ollama uses the GPU memory of a second machine through the llama.cpp RPC backend, keeps one address and the same API, and splits only the models that do not fit on the first machine. It also keeps GGUF models from Hugging Face as plain repository copies, moves rarely used models to another disk (`ollama cluster mv`), shows models and load with `ollama cluster ls` / `ps`, lets you choose where models go (`ollama cluster policy`), and serves a live page at `http://<host>:11434/cluster`. Full description: [docs/cluster.md](docs/cluster.md).
 
 Built and tested on two NVIDIA DGX Spark (ASUS Ascent GX10) connected with a direct 200 Gb/s cable. The fork follows upstream `main`; the current build is Ollama 0.40.4 plus upstream changes up to 2026-10-17, with llama.cpp b11669.
 
