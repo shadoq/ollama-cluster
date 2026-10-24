@@ -132,8 +132,8 @@ func (s *Server) ClusterStatusHandler(c *gin.Context) {
 			KeepAlive:    r.sessionDuration,
 			PID:          r.pid,
 		}
-		if r.model != nil {
-			lm.Model = model.ParseName(r.model.ShortName).DisplayShortest()
+		if m := r.model.Load(); m != nil {
+			lm.Model = model.ParseName(m.ShortName).DisplayShortest()
 		}
 		if r.Options != nil {
 			lm.Context = r.Options.NumCtx

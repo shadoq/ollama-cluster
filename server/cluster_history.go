@@ -90,8 +90,8 @@ func (s *Server) clusterSample(ctx context.Context) cluster.Sample {
 				continue
 			}
 			name := r.modelKey
-			if r.model != nil {
-				name = model.ParseName(r.model.ShortName).DisplayShortest()
+			if m := r.model.Load(); m != nil {
+				name = model.ParseName(m.ShortName).DisplayShortest()
 			}
 			size := r.totalSize
 			r.refMu.Unlock()
