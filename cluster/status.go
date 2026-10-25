@@ -36,9 +36,17 @@ type WorkerStatus struct {
 	// Running reports whether the RPC server process is up.
 	Running bool `json:"running"`
 
-	// Clients is the number of connected llama-server processes. The RPC
-	// server serves one client at a time, so a worker with a client is busy.
+	// Clients is the number of llama-server processes connected to the
+	// first RPC server. An RPC server serves one client at a time.
 	Clients int `json:"clients"`
+
+	// MaxSlots is how many RPC servers the worker runs at most, so how many
+	// models it serves at once. FreeSlots is how many more models it can take
+	// now: idle RPC servers plus the ones it may still start. Slots are the
+	// running RPC servers, the always running one first.
+	MaxSlots  int          `json:"max_slots,omitempty"`
+	FreeSlots int          `json:"free_slots"`
+	Slots     []SlotStatus `json:"slots,omitempty"`
 
 	// Transport is the RPC transport line printed by the server, e.g.
 	// "TCP (RDMA auto-negotiate enabled)".
@@ -60,14 +68,55 @@ type WorkerStatus struct {
 	LastError string    `json:"last_error,omitempty"`
 }
 
+// SlotStatus is one RPC server of a worker.
+type SlotStatus struct {
+	Index    int    `json:"index"`
+	Endpoint string `json:"endpoint"`
+	Running  bool   `json:"running"`
+	Clients  int    `json:"clients"`
+
+	// Reserved is set while a llama-server that got the slot has not
+	// connected yet.
+	Reserved bool `json:"reserved,omitempty"`
+
+	// IdleSince is when the last client of an extra slot left; the worker
+	// stops the slot after the slot idle time.
+	IdleSince time.Time `json:"idle_since,omitzero"`
+
+	// Link is the transport negotiated with the last client of this slot.
+	Link string `json:"link,omitempty"`
+}
+
+// Free reports whether the slot can take a model now.
+func (s SlotStatus) Free() bool {
+	return s.Running && s.Clients == 0 && !s.Reserved
+}
+
+// SlotsLabel says how many slots are in use, e.g. "1 of 3 slots used".
+func (s *WorkerStatus) SlotsLabel() string {
+	if s == nil || s.MaxSlots == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d of %d slots used", s.MaxSlots-s.FreeSlots, s.MaxSlots)
+}
+
 // TransportLabel is the transport to show for the worker: the one negotiated
 // with the last client, or what the server offers while none has connected.
 func (s *WorkerStatus) TransportLabel() string {
+	link := ""
+	if s != nil {
+		link = s.Link
+		for _, sl := range s.Slots {
+			if link == "" {
+				link = sl.Link
+			}
+		}
+	}
 	switch {
 	case s == nil:
 		return ""
-	case s.Link != "":
-		return s.Link
+	case link != "":
+		return link
 	case s.Transport != "":
 		return s.Transport + ", no client yet"
 	}
@@ -92,7 +141,8 @@ type WorkerCheck struct {
 	// RPC server is up.
 	Usable bool `json:"usable"`
 
-	// Busy is true when another llama-server is connected to the worker.
+	// Busy is true when the worker cannot take another model: all its RPC
+	// servers serve one.
 	Busy bool `json:"busy"`
 
 	// Problem is a one sentence explanation when the worker is not usable,
@@ -163,7 +213,7 @@ func CheckWorker(ctx context.Context, w Worker) WorkerCheck {
 		c.Fix = "ollama cluster doctor"
 	default:
 		c.Usable = true
-		c.Busy = st.Clients > 0
+		c.Busy = st.busy()
 	}
 	return c
 }
@@ -184,6 +234,15 @@ func CheckWorkers(ctx context.Context, cfg *Config) []WorkerCheck {
 	return checks
 }
 
+// busy reports whether the worker has no RPC server left for a model.
+func (st *WorkerStatus) busy() bool {
+	if st.MaxSlots == 0 {
+		// a worker without slots runs one RPC server
+		return st.Clients > 0
+	}
+	return st.FreeSlots == 0
+}
+
 // RPCDeviceName is the name llama-server gives the n-th device of a worker
 // in its logs, e.g. "RPC0[10.100.48.2:50052]".
 func RPCDeviceName(endpoint string, n int) string {
@@ -191,9 +250,11 @@ func RPCDeviceName(endpoint string, n int) string {
 }
 
 // DeviceInfos turns a usable worker into scheduler devices. A busy worker is
-// reported with no free memory so the scheduler does not give it a second
-// model; the RPC server would block the second client until the first one
-// disconnects.
+// reported with no free memory so the scheduler does not give it another
+// model; an RPC server blocks a second client until the first one
+// disconnects. The device IDs name the first RPC server of the worker
+// whichever slot a model gets, so the scheduler adds up the models of all
+// slots on the same GPU.
 func (c WorkerCheck) DeviceInfos() []ml.DeviceInfo {
 	if !c.Usable || c.Status == nil {
 		return nil
@@ -249,7 +310,7 @@ func logTransition(c WorkerCheck) {
 	case !c.Usable:
 		slog.Warn("cluster worker skipped, models load on this machine only", "worker", c.Worker.Label(), "problem", c.Problem, "fix", c.Fix)
 	case c.Busy:
-		slog.Info("cluster worker busy with a loaded model", "worker", c.Worker.Label(), "endpoint", key)
+		slog.Info("cluster worker busy, all its RPC servers hold a model", "worker", c.Worker.Label(), "endpoint", key)
 	default:
 		var total, free uint64
 		for _, d := range c.Status.Devices {
@@ -435,8 +496,8 @@ func endpointOf(id string) string {
 	return id
 }
 
-// ErrWorkerBusy means a worker serves another llama-server.
-var ErrWorkerBusy = errors.New("busy with another model")
+// ErrWorkerBusy means all RPC servers of a worker serve other llama-servers.
+var ErrWorkerBusy = errors.New("busy with other models, no free RPC slot")
 
 // VerifyEndpoints re-checks the workers behind endpoints right before
 // llama-server starts. It returns the reason when one of them can no longer
@@ -496,6 +557,25 @@ func LlamaDeviceNames(gpus []ml.DeviceInfo) []string {
 		}
 	}
 	return names
+}
+
+// SlotDevices returns copies of gpus whose worker devices carry the names
+// llama-server logs for them on the reserved slots (slots maps the first RPC
+// endpoint of a worker to the reserved one): "RPC0[10.100.48.2:50054]". The
+// device IDs stay those of the first RPC server.
+func SlotDevices(gpus []ml.DeviceInfo, slots map[string]string) []ml.DeviceInfo {
+	gpus = slices.Clone(gpus)
+	for i, g := range gpus {
+		if !IsRemote(g) {
+			continue
+		}
+		ep := endpointOf(g.ID)
+		if slot, ok := slots[ep]; ok {
+			ep = slot
+		}
+		gpus[i].Name = RPCDeviceName(ep, deviceIndex(g.ID))
+	}
+	return gpus
 }
 
 func deviceIndex(id string) int {

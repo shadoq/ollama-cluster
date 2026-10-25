@@ -180,13 +180,13 @@ func printPolicy(c *cluster.Config) {
 	if c.Tensor {
 		fmt.Println("\nModels without a rule of their own run with tensor parallelism: both machines")
 		fmt.Println("compute every layer, half of the model on each, which generates faster than")
-		fmt.Println("one machine. The model takes the worker even when it fits here. While the")
-		fmt.Println("worker holds another model, or half of the model does not fit on one of the")
-		fmt.Println("machines, the policy above decides.")
+		fmt.Println("one machine. The model takes a slot of the worker even when it fits here.")
+		fmt.Println("While all slots of the worker hold a model, or half of the model does not fit")
+		fmt.Println("on one of the machines, the policy above decides.")
 	}
 	if c.Policy == cluster.PolicyWorkerFirst {
 		fmt.Println("\nA model that fits on the worker loads there only; a larger one is split")
-		fmt.Println("with the worker filled first. When the worker is busy with another model,")
+		fmt.Println("with the worker filled first. When all slots of the worker hold a model,")
 		fmt.Println("the model loads here as under auto.")
 	}
 	if len(c.Models) == 0 {

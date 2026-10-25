@@ -186,6 +186,8 @@ type addOptions struct {
 	name          string
 	mode          string
 	cache         bool
+	maxSlots      int
+	slotIdle      time.Duration
 	testModel     string
 	noTest        bool
 
@@ -215,6 +217,8 @@ func addCmd() *cobra.Command {
 	f.StringVar(&o.name, "name", "", "worker name (default: its hostname)")
 	f.StringVar(&o.mode, "mode", "", "worker installation: docker or native (default: docker when available there)")
 	f.BoolVar(&o.cache, "cache", false, "enable the worker tensor cache")
+	f.IntVar(&o.maxSlots, "max-slots", 0, fmt.Sprintf("models the worker serves at once, one RPC server each (default %d)", cluster.DefaultMaxSlots))
+	f.DurationVar(&o.slotIdle, "slot-idle", 0, fmt.Sprintf("how long a released extra RPC server is kept (default %s)", cluster.DefaultSlotIdle))
 	f.StringVar(&o.testModel, "test-model", "", "model for the final split test (default: the smallest local model)")
 	f.BoolVar(&o.noTest, "no-test", false, "skip the final split test")
 	return cmd
@@ -385,6 +389,8 @@ func runAdd(cmd *cobra.Command, target string, o addOptions) error {
 		StatusPort: o.statusPort,
 		Mode:       mode,
 		Cache:      o.cache,
+		MaxSlots:   o.maxSlots,
+		SlotIdle:   int(o.slotIdle / time.Second),
 	}
 	if err := w.Validate(); err != nil {
 		return err
@@ -531,6 +537,12 @@ func workerArgs(w cluster.Worker, cache bool) []string {
 	if cache || w.Cache {
 		args = append(args, "--cache")
 	}
+	if w.MaxSlots > 0 {
+		args = append(args, "--max-slots", strconv.Itoa(w.MaxSlots))
+	}
+	if w.SlotIdle > 0 {
+		args = append(args, "--slot-idle", (time.Duration(w.SlotIdle) * time.Second).String())
+	}
 	return args
 }
 
@@ -671,13 +683,36 @@ const stopNativeWorker = `if [ -f "$HOME/.config/systemd/user/ollama-cluster-wor
   rm -rf "$HOME/.ollama-cluster/worker"
 fi`
 
+// firewallRule admits only this machine to the worker ports: the RPC ports
+// of all slots, the ports the first of the two RPC servers of a model split
+// by tensors listens on for the second one (on all interfaces), and the
+// status port.
 func firewallRule(w cluster.Worker) string {
+	var ports []string
+	for _, p := range w.SlotPorts() {
+		ports = append(ports, strconv.Itoa(p))
+	}
+	for _, p := range w.SlotPorts() {
+		ports = append(ports, strconv.Itoa(p+cluster.TensorPortOffset))
+	}
+	ports = append(ports, strconv.Itoa(w.StatusPortNumber()))
+	return fmt.Sprintf("INPUT ! -i lo -p tcp -m multiport --dports %s ! -s %s -j DROP", strings.Join(ports, ","), shellQuote(w.LocalAddr))
+}
+
+// legacyFirewallRule is the rule of workers with one RPC server, which left
+// the tensor parallelism port open.
+func legacyFirewallRule(w cluster.Worker) string {
 	return fmt.Sprintf("INPUT ! -i lo -p tcp -m multiport --dports %d,%d ! -s %s -j DROP", w.RPCPort, w.StatusPort, shellQuote(w.LocalAddr))
 }
 
-// firewallState reports "present", "absent" or "unknown" (sudo needs a password).
+// firewallState reports "present", "absent" or "unknown" (sudo needs a
+// password) for the firewall rule of the worker.
 func firewallState(ctx context.Context, rm remote, w cluster.Worker) string {
-	out, _ := rm.run(ctx, fmt.Sprintf("sudo -n iptables -C %s 2>&1; echo rc=$?", firewallRule(w)))
+	return ruleState(ctx, rm, firewallRule(w))
+}
+
+func ruleState(ctx context.Context, rm remote, rule string) string {
+	out, _ := rm.run(ctx, fmt.Sprintf("sudo -n iptables -C %s 2>&1; echo rc=$?", rule))
 	switch {
 	case strings.Contains(out, "rc=0"):
 		return "present"
@@ -699,6 +734,7 @@ func ensureFirewall(ctx context.Context, rm remote, w cluster.Worker) {
 	case "absent":
 		if _, err := rm.run(ctx, "sudo -n iptables -I "+firewallRule(w)); err == nil {
 			step("Firewall on %s: worker ports open only to %s", w.Label(), w.LocalAddr)
+			dropLegacyFirewall(ctx, rm, w)
 			return
 		}
 	}
@@ -714,6 +750,14 @@ func ensureFirewall(ctx context.Context, rm remote, w cluster.Worker) {
 		}
 	}
 	fmt.Printf("  WARNING: no firewall rule on %s. The worker listens only on the cable address %s; to also block other hosts run there:\n    %s\n", w.Label(), w.Addr, cmdline)
+}
+
+// dropLegacyFirewall removes the rule of a worker with one RPC server once
+// the current rule covers its ports.
+func dropLegacyFirewall(ctx context.Context, rm remote, w cluster.Worker) {
+	if legacy := legacyFirewallRule(w); legacy != firewallRule(w) {
+		_, _ = rm.run(ctx, "sudo -n iptables -D "+legacy+" 2>/dev/null; true")
+	}
 }
 
 // updateMainContainer recreates the main container with what the cluster
@@ -998,6 +1042,7 @@ func removeCmd() *cobra.Command {
 						if _, err := rm.run(ctx, "sudo -n iptables -D "+firewallRule(w)); err == nil {
 							step("Firewall rule on %s removed", w.Label())
 						}
+						dropLegacyFirewall(ctx, rm, w)
 					case "unknown":
 						cmdline := "sudo iptables -D " + firewallRule(w)
 						if interactive() && confirm(fmt.Sprintf("  Remove the firewall rule on %s (sudo password there)?", w.Label()), true) {

@@ -236,8 +236,9 @@ Rules for single models win over the policy and over tensor parallelism:
   tensor  tensor parallel across both machines, for this model
   auto    remove the rule
 
-The worker holds one model at a time. When it is busy, a model that would go
-there loads here as under auto. A request with "cluster_split": true or false
+The worker serves up to max_slots models at once (3 by default), each on an
+RPC server of its own, also several with tensor parallelism. When all of them
+hold a model, a model that would go there loads here as under auto. A request with "cluster_split": true or false
 in its options still forces a split or this machine, and "cluster_tensor":
 true or false forces or forbids tensor parallelism.`,
 		example: `  ollama cluster policy

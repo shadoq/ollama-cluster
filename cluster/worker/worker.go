@@ -1,7 +1,9 @@
-// Package worker runs the cluster worker: the ggml RPC server from Ollama's
+// Package worker runs the cluster worker: the ggml RPC servers from Ollama's
 // own llama.cpp build plus a small status server that tells the main Ollama
-// which build the worker runs, how much memory it has and whether a model is
-// already using it.
+// which build the worker runs, how much memory it has and which RPC servers
+// are free. An RPC server serves one model at a time, so the worker runs one
+// per model (a slot): the first one always, the others on request from the
+// main Ollama, up to MaxSlots.
 package worker
 
 import (
@@ -43,14 +45,76 @@ type Options struct {
 
 	// Threads is the CPU thread count passed to the RPC server (0 = default).
 	Threads int
+
+	// MaxSlots is how many RPC servers run at most (0 = default).
+	MaxSlots int
+
+	// SlotIdle is how long a released extra RPC server is kept (0 = default).
+	SlotIdle time.Duration
 }
 
-// Worker supervises the RPC server process.
+// Worker supervises the RPC server processes.
 type Worker struct {
-	opts Options
+	opts  Options
+	ports []int
 
 	mu     sync.Mutex
 	status cluster.WorkerStatus
+	// slots are the RPC servers that run or start, ordered by index; the
+	// first one is always there.
+	slots []*slot
+
+	// run runs the RPC server of a slot until it exits or ctx ends; sockets
+	// reports whether a port listens and how many clients it has. Tests
+	// replace them.
+	run     func(ctx context.Context, s *slot) error
+	sockets func(port int) (listening bool, clients int)
+	now     func() time.Time
+}
+
+// slot is one RPC server.
+type slot struct {
+	index int
+	port  int
+
+	// link is the transport negotiated with the last client.
+	link string
+	// reservedUntil keeps the slot for the llama-server that got it until
+	// that one connects.
+	reservedUntil time.Time
+	// idleSince is when an extra slot was first seen without a client.
+	idleSince time.Time
+	stopping  bool
+
+	cancel context.CancelFunc
+}
+
+// errNoSlot means every slot serves a model and no more may start.
+var errNoSlot = errors.New("all RPC servers of the worker serve a model")
+
+func newWorker(opts Options) *Worker {
+	if opts.RPCPort == 0 {
+		opts.RPCPort = cluster.DefaultRPCPort
+	}
+	if opts.StatusPort == 0 {
+		opts.StatusPort = cluster.DefaultStatusPort
+	}
+	if opts.MaxSlots <= 0 {
+		opts.MaxSlots = cluster.DefaultMaxSlots
+	}
+	opts.MaxSlots = min(opts.MaxSlots, cluster.MaxSlotLimit)
+	if opts.SlotIdle <= 0 {
+		opts.SlotIdle = cluster.DefaultSlotIdle
+	}
+	w := &Worker{
+		opts:    opts,
+		ports:   cluster.SlotPorts(opts.RPCPort, opts.StatusPort, opts.MaxSlots),
+		sockets: rpcSockets,
+		now:     time.Now,
+	}
+	w.run = w.runServer
+	w.slots = []*slot{{index: 0, port: opts.RPCPort}}
+	return w
 }
 
 // Run starts the RPC server and the status server and blocks until ctx ends.
@@ -61,24 +125,18 @@ func Run(ctx context.Context, opts Options) error {
 	if ip := net.ParseIP(opts.Addr); ip != nil && ip.IsUnspecified() {
 		return errors.New("refusing to listen on all interfaces: the RPC server has no authentication, use the direct-link address")
 	}
-	if opts.RPCPort == 0 {
-		opts.RPCPort = cluster.DefaultRPCPort
-	}
-	if opts.StatusPort == 0 {
-		opts.StatusPort = cluster.DefaultStatusPort
-	}
 
 	hostname, _ := os.Hostname()
-	w := &Worker{opts: opts}
+	w := newWorker(opts)
 	w.status = cluster.WorkerStatus{
 		Hostname:  hostname,
 		Version:   version.Version,
 		LlamaCpp:  cluster.LlamaCppVersion,
-		Endpoint:  net.JoinHostPort(opts.Addr, strconv.Itoa(opts.RPCPort)),
+		Endpoint:  w.endpoint(w.opts.RPCPort),
 		StartedAt: time.Now(),
 	}
 
-	ln, err := net.Listen("tcp", net.JoinHostPort(opts.Addr, strconv.Itoa(opts.StatusPort)))
+	ln, err := net.Listen("tcp", net.JoinHostPort(w.opts.Addr, strconv.Itoa(w.opts.StatusPort)))
 	if err != nil {
 		return fmt.Errorf("status server: %w", err)
 	}
@@ -94,11 +152,12 @@ func Run(ctx context.Context, opts Options) error {
 	}()
 
 	slog.Info("cluster worker starting", "version", version.Version, "llama_cpp", cluster.LlamaCppVersion,
-		"rpc", w.status.Endpoint, "status", ln.Addr().String())
+		"rpc", w.status.Endpoint, "status", ln.Addr().String(), "max_slots", w.opts.MaxSlots, "slot_idle", w.opts.SlotIdle)
+	go w.reapLoop(ctx)
 	return w.supervise(ctx)
 }
 
-// supervise keeps the RPC server running, restarting it with backoff.
+// supervise keeps the first RPC server running, restarting it with backoff.
 func (w *Worker) supervise(ctx context.Context) error {
 	backoff := 2 * time.Second
 	for {
@@ -128,17 +187,9 @@ func (w *Worker) supervise(ctx context.Context) error {
 	}
 }
 
+// runOnce lists the devices and runs the first RPC server until it exits.
 func (w *Worker) runOnce(ctx context.Context) error {
-	exe, err := llm.FindLlamaCppBinary("ggml-rpc-server")
-	if err != nil {
-		return fmt.Errorf("this Ollama build has no RPC worker: %w", err)
-	}
-	libDirs := []string{ml.LibOllamaPath}
-	if dir := gpuLibDir(); dir != "" {
-		libDirs = append(libDirs, dir)
-	}
-
-	devices, err := listDevices(ctx, libDirs)
+	devices, err := listDevices(ctx, rpcLibDirs())
 	if err != nil {
 		return err
 	}
@@ -148,9 +199,29 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	markIntegrated(devices)
 	w.mu.Lock()
 	w.status.Devices = devices
+	first := w.slots[0]
 	w.mu.Unlock()
 
-	args := []string{"-H", w.opts.Addr, "-p", strconv.Itoa(w.opts.RPCPort)}
+	return w.run(ctx, first)
+}
+
+func rpcLibDirs() []string {
+	libDirs := []string{ml.LibOllamaPath}
+	if dir := gpuLibDir(); dir != "" {
+		libDirs = append(libDirs, dir)
+	}
+	return libDirs
+}
+
+// runServer runs the RPC server of a slot until it exits or ctx ends.
+func (w *Worker) runServer(ctx context.Context, s *slot) error {
+	exe, err := llm.FindLlamaCppBinary("ggml-rpc-server")
+	if err != nil {
+		return fmt.Errorf("this Ollama build has no RPC worker: %w", err)
+	}
+	libDirs := rpcLibDirs()
+
+	args := []string{"-H", w.opts.Addr, "-p", strconv.Itoa(s.port)}
 	if w.opts.Cache {
 		args = append(args, "-c")
 	}
@@ -174,12 +245,12 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	}
 	cmd.Stderr = cmd.Stdout
 
-	slog.Info("starting rpc server", "cmd", cmd.String(), "libs", libDirs)
+	slog.Info("starting rpc server", "slot", s.index, "cmd", cmd.String(), "libs", libDirs)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
 
-	lastLine := w.readOutput(stdout)
+	lastLine := w.readOutput(stdout, s)
 	err = cmd.Wait()
 	if err == nil {
 		err = errors.New("rpc server exited")
@@ -190,9 +261,13 @@ func (w *Worker) runOnce(ctx context.Context) error {
 	return err
 }
 
-// readOutput forwards the RPC server output to the log and records the
-// transport it reports. It returns the last non-empty line.
-func (w *Worker) readOutput(r io.Reader) (lastLine string) {
+// readOutput forwards the RPC server output of a slot to the log and records
+// the transport it reports. It returns the last non-empty line.
+func (w *Worker) readOutput(r io.Reader, s *slot) (lastLine string) {
+	prefix := ""
+	if s.index > 0 {
+		prefix = fmt.Sprintf("[slot %d] ", s.index)
+	}
 	var link linkState
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
@@ -200,7 +275,7 @@ func (w *Worker) readOutput(r io.Reader) (lastLine string) {
 		if strings.TrimSpace(line) != "" {
 			lastLine = strings.TrimSpace(line)
 		}
-		fmt.Fprintln(os.Stderr, line)
+		fmt.Fprintln(os.Stderr, prefix+line)
 
 		if key, value, ok := strings.Cut(line, ":"); ok && strings.TrimSpace(key) == "transport" {
 			w.mu.Lock()
@@ -209,7 +284,10 @@ func (w *Worker) readOutput(r io.Reader) (lastLine string) {
 		}
 		if link.update(line) {
 			w.mu.Lock()
-			w.status.Link = link.label
+			s.link = link.label
+			if s.index == 0 {
+				w.status.Link = link.label
+			}
 			w.mu.Unlock()
 		}
 	}
@@ -334,18 +412,211 @@ func (w *Worker) handler() http.Handler {
 		rw.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(rw).Encode(w.snapshot())
 	})
+	mux.HandleFunc("POST /v1/slots/acquire", func(rw http.ResponseWriter, r *http.Request) {
+		lease, err := w.acquire(r.Context())
+		switch {
+		case errors.Is(err, errNoSlot):
+			http.Error(rw, err.Error(), http.StatusConflict)
+			return
+		case err != nil:
+			http.Error(rw, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		rw.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(rw).Encode(lease)
+	})
+	mux.HandleFunc("POST /v1/slots/release", func(rw http.ResponseWriter, r *http.Request) {
+		var req cluster.SlotRelease
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+			http.Error(rw, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.release(req.Endpoint)
+		rw.WriteHeader(http.StatusNoContent)
+	})
 	return mux
+}
+
+func (w *Worker) endpoint(port int) string {
+	return net.JoinHostPort(w.opts.Addr, strconv.Itoa(port))
+}
+
+// slotState checks the sockets of a slot and settles its reservation, which
+// ends when its llama-server connects or the reservation runs out. w.mu must
+// be held.
+func (w *Worker) slotState(s *slot, now time.Time) cluster.SlotStatus {
+	listening, clients := w.sockets(s.port)
+	if clients > 0 || now.After(s.reservedUntil) {
+		s.reservedUntil = time.Time{}
+	}
+	st := cluster.SlotStatus{
+		Index:    s.index,
+		Endpoint: w.endpoint(s.port),
+		Running:  listening && !s.stopping,
+		Clients:  clients,
+		Reserved: !s.reservedUntil.IsZero(),
+		Link:     s.link,
+	}
+	if s.index > 0 && clients == 0 {
+		st.IdleSince = s.idleSince
+	}
+	return st
+}
+
+// acquire reserves a free RPC server for a model, starting a new one when
+// none is free and fewer than MaxSlots run.
+func (w *Worker) acquire(ctx context.Context) (cluster.SlotLease, error) {
+	w.mu.Lock()
+	now := w.now()
+	for _, s := range w.slots {
+		if w.slotState(s, now).Free() {
+			s.reservedUntil = now.Add(cluster.SlotLeaseTTL)
+			s.idleSince = time.Time{}
+			w.mu.Unlock()
+			slog.Info("rpc slot reserved", "slot", s.index, "port", s.port)
+			return cluster.SlotLease{Index: s.index, Endpoint: w.endpoint(s.port)}, nil
+		}
+	}
+	if len(w.slots) >= w.opts.MaxSlots {
+		w.mu.Unlock()
+		return cluster.SlotLease{}, errNoSlot
+	}
+
+	// the lowest unused index; the new slot stays reserved while it starts
+	index := 0
+	for _, s := range w.slots {
+		if s.index == index {
+			index++
+		}
+	}
+	sctx, cancel := context.WithCancel(context.Background())
+	s := &slot{index: index, port: w.ports[index], reservedUntil: now.Add(cluster.SlotStartTimeout + cluster.SlotLeaseTTL), cancel: cancel}
+	w.slots = append(w.slots, s)
+	slices.SortFunc(w.slots, func(a, b *slot) int { return a.index - b.index })
+	w.mu.Unlock()
+
+	done := make(chan error, 1)
+	go func() {
+		err := w.run(sctx, s)
+		w.mu.Lock()
+		w.slots = slices.DeleteFunc(w.slots, func(o *slot) bool { return o == s })
+		w.mu.Unlock()
+		if sctx.Err() == nil {
+			slog.Warn("rpc slot exited", "slot", s.index, "port", s.port, "error", err)
+		}
+		cancel()
+		done <- err
+	}()
+
+	slog.Info("starting rpc slot", "slot", index, "port", s.port)
+	deadline := time.NewTimer(cluster.SlotStartTimeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(100 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		w.mu.Lock()
+		listening, _ := w.sockets(s.port)
+		if listening {
+			s.reservedUntil = w.now().Add(cluster.SlotLeaseTTL)
+			w.mu.Unlock()
+			slog.Info("rpc slot reserved", "slot", s.index, "port", s.port)
+			return cluster.SlotLease{Index: s.index, Endpoint: w.endpoint(s.port)}, nil
+		}
+		w.mu.Unlock()
+		select {
+		case err := <-done:
+			if err == nil {
+				err = errors.New("rpc server exited")
+			}
+			return cluster.SlotLease{}, fmt.Errorf("starting rpc slot %d: %w", index, err)
+		case <-deadline.C:
+			cancel()
+			return cluster.SlotLease{}, fmt.Errorf("rpc slot %d did not listen on port %d within %s", index, s.port, cluster.SlotStartTimeout)
+		case <-ctx.Done():
+			// the new slot goes on starting and serves the next request
+			return cluster.SlotLease{}, ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+// release ends the reservation of the slot at endpoint.
+func (w *Worker) release(endpoint string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, s := range w.slots {
+		if w.endpoint(s.port) == endpoint && !s.reservedUntil.IsZero() {
+			s.reservedUntil = time.Time{}
+			slog.Info("rpc slot released", "slot", s.index, "port", s.port)
+		}
+	}
+}
+
+// reap stops extra slots that had neither a client nor a reservation for
+// the slot idle time. The first slot always runs.
+func (w *Worker) reap() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := w.now()
+	for _, s := range w.slots {
+		if s.index == 0 || s.stopping {
+			continue
+		}
+		st := w.slotState(s, now)
+		switch {
+		case st.Clients > 0 || st.Reserved:
+			s.idleSince = time.Time{}
+		case s.idleSince.IsZero():
+			s.idleSince = now
+		case now.Sub(s.idleSince) >= w.opts.SlotIdle:
+			slog.Info("stopping idle rpc slot", "slot", s.index, "port", s.port, "idle", now.Sub(s.idleSince).Round(time.Second))
+			s.stopping = true
+			s.cancel()
+		}
+	}
+}
+
+func (w *Worker) reapLoop(ctx context.Context) {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			w.mu.Lock()
+			for _, s := range w.slots {
+				if s.cancel != nil {
+					s.cancel()
+				}
+			}
+			w.mu.Unlock()
+			return
+		case <-t.C:
+			w.reap()
+		}
+	}
 }
 
 func (w *Worker) snapshot() cluster.WorkerStatus {
 	w.mu.Lock()
 	st := w.status
 	st.Devices = slices.Clone(w.status.Devices)
+	now := w.now()
+	st.MaxSlots = w.opts.MaxSlots
+	st.FreeSlots = w.opts.MaxSlots - len(w.slots)
+	st.Slots = nil
+	for _, s := range w.slots {
+		ss := w.slotState(s, now)
+		if ss.Free() {
+			st.FreeSlots++
+		}
+		if s.index == 0 {
+			st.Running = ss.Running
+			st.Clients = ss.Clients
+		}
+		st.Slots = append(st.Slots, ss)
+	}
 	w.mu.Unlock()
 
-	listening, clients := rpcSockets(w.opts.RPCPort)
-	st.Running = listening
-	st.Clients = clients
 	if st.Running {
 		st.LastError = ""
 	}

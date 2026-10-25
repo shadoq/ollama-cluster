@@ -184,7 +184,7 @@ func selectTensorPlacement(cfg *cluster.Config, group, remote []ml.DeviceInfo, p
 	}
 	worker := remote[0]
 	if worker.FreeMemory == 0 {
-		return nil, opts, "the cluster worker is busy with another model"
+		return nil, opts, "the cluster worker has no free RPC slot, all of them hold a model"
 	}
 	if w, ok := cfg.WorkerByEndpoint(cluster.Endpoints(remote)[0]); !ok || w.LocalAddr == "" {
 		return nil, opts, "the worker has no address of this machine on the direct link (local_addr); run 'ollama cluster add' again"
@@ -302,7 +302,7 @@ func clusterFitError(modelName string, systemInfo ml.SystemInfo, allGpus, loadGp
 
 	var reasons []string
 	if len(remote) > 0 {
-		reasons = append(reasons, "the cluster worker is busy with another model")
+		reasons = append(reasons, "the cluster worker has no free RPC slot, all of them hold a model")
 	} else {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()

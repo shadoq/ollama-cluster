@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ollama/ollama/envconfig"
 )
@@ -28,6 +29,23 @@ import (
 const (
 	DefaultRPCPort    = 50052
 	DefaultStatusPort = 50053
+
+	// DefaultMaxSlots is how many RPC servers a worker runs at most, the
+	// always running one included; each serves one model.
+	DefaultMaxSlots = 3
+
+	// MaxSlotLimit bounds max_slots: the firewall rule lists every slot port
+	// and its tensor parallelism port, and iptables multiport takes 15 ports.
+	MaxSlotLimit = 7
+
+	// DefaultSlotIdle is how long a released extra RPC server waits for the
+	// next model before the worker stops it.
+	DefaultSlotIdle = 30 * time.Minute
+
+	// TensorPortOffset is what llama.cpp adds to the port of the first RPC
+	// server for the link between the two servers of a model split by
+	// tensors (ggml_backend_rpc_comm_init).
+	TensorPortOffset = 1000
 
 	// PolicyAuto places a model on remote workers only when it does not fit
 	// on the local GPUs. PolicySpread always splits models across all devices.
@@ -103,6 +121,14 @@ type Worker struct {
 	// Cache enables the RPC tensor cache of the worker (add --cache).
 	Cache bool `json:"cache,omitempty"`
 
+	// MaxSlots is how many RPC servers the worker runs at most, so how many
+	// models it serves at once; 0 means DefaultMaxSlots.
+	MaxSlots int `json:"max_slots,omitempty"`
+
+	// SlotIdle is how long, in seconds, a released extra RPC server is kept
+	// for the next model; 0 means DefaultSlotIdle.
+	SlotIdle int `json:"slot_idle,omitempty"`
+
 	// Disabled keeps the worker configured but unused.
 	Disabled bool `json:"disabled,omitempty"`
 }
@@ -139,6 +165,45 @@ func (w Worker) statusPort() int {
 		return w.StatusPort
 	}
 	return DefaultStatusPort
+}
+
+// MaxSlotCount is how many RPC servers the worker runs at most.
+func (w Worker) MaxSlotCount() int {
+	if w.MaxSlots > 0 {
+		return w.MaxSlots
+	}
+	return DefaultMaxSlots
+}
+
+// SlotIdleDuration is how long the worker keeps a released extra RPC server.
+func (w Worker) SlotIdleDuration() time.Duration {
+	if w.SlotIdle > 0 {
+		return time.Duration(w.SlotIdle) * time.Second
+	}
+	return DefaultSlotIdle
+}
+
+// StatusPortNumber is the port of the worker status server.
+func (w Worker) StatusPortNumber() int {
+	return w.statusPort()
+}
+
+// SlotPorts are the RPC ports of the worker slots.
+func (w Worker) SlotPorts() []int {
+	return SlotPorts(w.rpcPort(), w.statusPort(), w.MaxSlotCount())
+}
+
+// SlotPorts are the RPC ports of n slots: the first one is rpcPort, the
+// others the next ports above it, skipping the status port (by default it is
+// rpcPort + 1).
+func SlotPorts(rpcPort, statusPort, n int) []int {
+	ports := make([]int, 0, n)
+	for p := rpcPort; len(ports) < n; p++ {
+		if p != statusPort || p == rpcPort {
+			ports = append(ports, p)
+		}
+	}
+	return ports
 }
 
 // Label is the worker name, falling back to its address.

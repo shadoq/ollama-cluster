@@ -57,11 +57,7 @@ func printStatus(m *mainOllama) {
 		case !c.Usable:
 			fmt.Printf("  %-26s PROBLEM: %s\n  %-26s Fix: %s\n", c.Worker.Label(), c.Problem, "", c.Fix)
 		default:
-			state := "idle"
-			if c.Busy {
-				state = "busy (a model is loaded on it)"
-			}
-			fmt.Printf("  worker %-19s %s, %s, %s\n", c.Worker.Label(), c.Worker.Endpoint(), c.Status.TransportLabel(), state)
+			fmt.Printf("  worker %-19s %s, %s, %s\n", c.Worker.Label(), c.Worker.Endpoint(), c.Status.TransportLabel(), busyState(c))
 		}
 	}
 	if len(st.Config.Workers) == 0 {
@@ -279,11 +275,7 @@ func doctorWorker(ctx context.Context, r *report, m *mainOllama, c cluster.Worke
 	if !c.Usable {
 		r.problem(name, w.Label(), c.Problem, c.Fix)
 	} else {
-		state := "idle"
-		if c.Busy {
-			state = "busy"
-		}
-		r.ok(name, fmt.Sprintf("%s %s, Ollama %s, %s", w.Label(), w.Endpoint(), c.Status.Version, state))
+		r.ok(name, fmt.Sprintf("%s %s, Ollama %s, %s", w.Label(), w.Endpoint(), c.Status.Version, busyState(c)))
 	}
 	if c.Status != nil {
 		switch {
@@ -335,6 +327,10 @@ echo "containers=$(docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep
 		case "present":
 			r.ok("Firewall", "worker ports only for "+w.LocalAddr)
 		case "absent":
+			if ruleState(ctx, rm, legacyFirewallRule(w)) == "present" {
+				r.warn("Firewall", "outdated rule", "The firewall rule on the worker leaves the ports of the extra RPC servers and of tensor parallelism open.", "ssh -t "+w.SSH+" 'sudo iptables -I "+firewallRule(w)+" && sudo iptables -D "+legacyFirewallRule(w)+"'")
+				break
+			}
 			r.warn("Firewall", "no rule", fmt.Sprintf("The worker listens only on the cable address %s, but any host on that link can use it (no authentication).", w.Addr), "ssh -t "+w.SSH+" sudo iptables -I "+firewallRule(w))
 		default:
 			r.info("Firewall", "not checked (sudo on the worker asks for a password)")

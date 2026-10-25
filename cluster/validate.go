@@ -42,6 +42,12 @@ func (w Worker) Validate() error {
 			return fmt.Errorf("worker %s: port %d is out of range", label, p)
 		}
 	}
+	if w.MaxSlots < 0 || w.MaxSlots > MaxSlotLimit {
+		return fmt.Errorf("worker %s: max_slots must be between 1 and %d, got %d", label, MaxSlotLimit, w.MaxSlots)
+	}
+	if w.SlotIdle < 0 {
+		return fmt.Errorf("worker %s: slot_idle must not be negative, got %d", label, w.SlotIdle)
+	}
 	switch w.Mode {
 	case "", "docker", "native":
 	default:

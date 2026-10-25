@@ -93,6 +93,8 @@ func workerCmd() *cobra.Command {
 	cmd.Flags().IntVar(&opts.StatusPort, "status-port", cluster.DefaultStatusPort, "status port")
 	cmd.Flags().BoolVar(&opts.Cache, "cache", false, "enable the RPC tensor cache")
 	cmd.Flags().IntVar(&opts.Threads, "threads", 0, "CPU threads of the RPC server")
+	cmd.Flags().IntVar(&opts.MaxSlots, "max-slots", cluster.DefaultMaxSlots, "RPC servers at most, one model each")
+	cmd.Flags().DurationVar(&opts.SlotIdle, "slot-idle", cluster.DefaultSlotIdle, "how long a released extra RPC server is kept")
 	return cmd
 }
 

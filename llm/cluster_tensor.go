@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,47 @@ import (
 // with it. The local server listens on this machine's address on the direct
 // link: through 127.0.0.1 the connection stays on TCP and generation is
 // several times slower than on one machine.
+
+// The RPC servers of the worker reserved for each llama-server (the first
+// RPC endpoint of a worker to the reserved one), by llama-server PID.
+var (
+	workerSlotsMu sync.Mutex
+	workerSlots   = map[int]map[string]string{}
+)
+
+func registerWorkerSlots(pid int, slots map[string]string) {
+	if len(slots) == 0 {
+		return
+	}
+	workerSlotsMu.Lock()
+	workerSlots[pid] = slots
+	workerSlotsMu.Unlock()
+}
+
+func unregisterWorkerSlots(pid int) {
+	workerSlotsMu.Lock()
+	delete(workerSlots, pid)
+	workerSlotsMu.Unlock()
+}
+
+func workerSlotsOf(pid int) map[string]string {
+	workerSlotsMu.Lock()
+	defer workerSlotsMu.Unlock()
+	return workerSlots[pid]
+}
+
+// WorkerSlots returns the RPC endpoints of the worker slots the llama-server
+// with this PID uses.
+func WorkerSlots(pid int) []string {
+	workerSlotsMu.Lock()
+	defer workerSlotsMu.Unlock()
+	var eps []string
+	for _, slot := range workerSlots[pid] {
+		eps = append(eps, slot)
+	}
+	slices.Sort(eps)
+	return eps
+}
 
 // tensorPeer is the local RPC server of one llama-server.
 type tensorPeer struct {
@@ -182,9 +224,10 @@ func tensorShare(pid int, byDevice map[string]uint64) uint64 {
 }
 
 // appendTensorArgs starts the local RPC server and returns the arguments for
-// tensor parallelism with the worker at endpoint. When that is not possible
-// it returns nil and the caller splits by layers.
-func appendTensorArgs(params []string, launch llamaServerLaunchConfig, endpoint string) ([]string, *tensorPeer) {
+// tensor parallelism with the worker at endpoint (its first RPC server),
+// using the RPC server reserved for the model at slot. When that is not
+// possible it returns nil and the caller splits by layers.
+func appendTensorArgs(params []string, launch llamaServerLaunchConfig, endpoint, slot string) ([]string, *tensorPeer) {
 	cfg, err := cluster.LoadConfig()
 	if err != nil {
 		slog.Warn("tensor parallelism not possible, splitting by layers", "error", err)
@@ -200,8 +243,8 @@ func appendTensorArgs(params []string, launch llamaServerLaunchConfig, endpoint 
 		slog.Warn("tensor parallelism not possible, splitting by layers", "error", err)
 		return nil, nil
 	}
-	slog.Info("running model with tensor parallelism", "worker", endpoint, "local", p.endpoint)
-	return append(params, tensorDeviceArgs(endpoint, p.endpoint)...), p
+	slog.Info("running model with tensor parallelism", "worker", slot, "local", p.endpoint)
+	return append(params, tensorDeviceArgs(slot, p.endpoint)...), p
 }
 
 // logTensorPeer forwards the output of the local RPC server to the log and

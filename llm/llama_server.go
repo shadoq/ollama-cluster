@@ -443,7 +443,8 @@ func startLlamaServer(launch llamaServerLaunchConfig, out io.Writer) (cmd *exec.
 	params = appendMainGPUArgs(params, launch.opts)
 
 	var peer *tensorPeer
-	if params, peer, err = appendRPCArgs(params, launch); err != nil {
+	var slots map[string]string
+	if params, peer, slots, err = appendRPCArgs(params, launch); err != nil {
 		return nil, 0, err
 	}
 	if peer == nil {
@@ -468,14 +469,18 @@ func startLlamaServer(launch llamaServerLaunchConfig, out io.Writer) (cmd *exec.
 
 	if err = cmd.Start(); err != nil {
 		peer.stop()
+		cluster.ReleaseSlots(context.Background(), slots)
 		return nil, 0, err
 	}
 	registerTensorPeer(cmd.Process.Pid, peer)
+	registerWorkerSlots(cmd.Process.Pid, slots)
 
 	if err = AddRunnerToJob(cmd.Process.Pid); err != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		stopTensorPeer(cmd.Process.Pid)
+		unregisterWorkerSlots(cmd.Process.Pid)
+		cluster.ReleaseSlots(context.Background(), slots)
 		return nil, 0, fmt.Errorf("assign llama-server to runner job: %w", err)
 	}
 	return cmd, port, nil
@@ -695,27 +700,36 @@ func appendMainGPUArgs(params []string, opts api.Options) []string {
 }
 
 // appendRPCArgs connects llama-server to the cluster workers among the
-// selected devices. The workers are checked again right before the start; a
-// worker that stopped answering, changed version or picked up another model
-// since placement is left out and the model loads on this machine only. A
-// worker that still shows the client of a model that just unloaded gets a
-// few seconds. A model placed on the workers only is not moved here: that
-// returns an error, so the next request places it again. A placement with
-// tensor parallelism also starts the local RPC server it needs and returns
-// it; when that fails the model is split by layers.
-func appendRPCArgs(params []string, launch llamaServerLaunchConfig) ([]string, *tensorPeer, error) {
+// selected devices. The workers are checked again right before the start and
+// each reserves an RPC server (a slot) for the model; a worker that stopped
+// answering, changed version or has no free slot left since placement is left
+// out and the model loads on this machine only. A worker that still shows the
+// client of a model that just unloaded gets a few seconds. A model placed on
+// the workers only is not moved here: that returns an error, so the next
+// request places it again. A placement with tensor parallelism also starts
+// the local RPC server it needs and returns it; when that fails the model is
+// split by layers. It returns the reserved slots by the first RPC endpoint of
+// each worker.
+func appendRPCArgs(params []string, launch llamaServerLaunchConfig) ([]string, *tensorPeer, map[string]string, error) {
 	gpus := launch.gpus
 	endpoints := cluster.Endpoints(gpus)
 	if len(endpoints) == 0 {
-		return params, nil, nil
+		return params, nil, nil, nil
 	}
 	local, _ := cluster.SplitDevices(gpus)
 
 	var err error
+	var slots map[string]string
 	for wait := 0; wait < 5; wait++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		err = cluster.VerifyEndpoints(ctx, endpoints)
 		cancel()
+		if err == nil {
+			// a new slot may take a while to start on the worker
+			ctx, cancel := context.WithTimeout(context.Background(), cluster.SlotStartTimeout+5*time.Second)
+			slots, err = cluster.AcquireSlots(ctx, endpoints)
+			cancel()
+		}
 		if err == nil || !errors.Is(err, cluster.ErrWorkerBusy) {
 			break
 		}
@@ -723,26 +737,30 @@ func appendRPCArgs(params []string, launch llamaServerLaunchConfig) ([]string, *
 	}
 	if err != nil {
 		if len(local) == 0 {
-			return nil, nil, fmt.Errorf("the model is placed on the cluster worker, which is not available now: %w", err)
+			return nil, nil, nil, fmt.Errorf("the model is placed on the cluster worker, which is not available now: %w", err)
 		}
 		slog.Warn("cluster worker unavailable at model start, loading on this machine only", "error", err)
-		return params, nil, nil
+		return params, nil, nil, nil
 	}
 
 	if clusterTensor(launch.opts) && len(local) == 1 && len(endpoints) == 1 {
-		if tensor, peer := appendTensorArgs(params, launch, endpoints[0]); peer != nil {
-			return tensor, peer, nil
+		if tensor, peer := appendTensorArgs(params, launch, endpoints[0], slots[endpoints[0]]); peer != nil {
+			return tensor, peer, slots, nil
 		}
 	}
 
-	slog.Info("splitting model across cluster workers", "workers", strings.Join(endpoints, ","))
-	params = append(params, "--rpc", strings.Join(endpoints, ","))
+	rpc := make([]string, len(endpoints))
+	for i, ep := range endpoints {
+		rpc[i] = slots[ep]
+	}
+	slog.Info("splitting model across cluster workers", "workers", strings.Join(rpc, ","))
+	params = append(params, "--rpc", strings.Join(rpc, ","))
 
 	// only worker devices selected: keep the model off this machine
 	if len(local) == 0 {
 		params = append(params, "--device", strings.Join(cluster.LlamaDeviceNames(gpus), ","))
 	}
-	return params, nil, nil
+	return params, nil, slots, nil
 }
 
 // appendClusterFitArgs passes the memory the cluster placement policy keeps
@@ -1153,6 +1171,11 @@ func (s *llamaServerRunner) startProcess() error {
 
 	s.cmd = cmd
 	s.port = port
+	// llama-server names the worker devices after the RPC servers reserved
+	// for this start
+	s.memoryMu.Lock()
+	s.gpus = cluster.SlotDevices(s.gpus, workerSlotsOf(cmd.Process.Pid))
+	s.memoryMu.Unlock()
 	s.done = make(chan struct{})
 	s.doneErr = nil
 	s.loadStart = time.Now()
@@ -1162,6 +1185,7 @@ func (s *llamaServerRunner) startProcess() error {
 	go func(cmd *exec.Cmd, done chan struct{}) {
 		err := cmd.Wait()
 		stopTensorPeer(cmd.Process.Pid)
+		unregisterWorkerSlots(cmd.Process.Pid)
 		s.doneErr = err
 		if msg := s.lastErrMsg(); err != nil && msg != "" {
 			slog.Error("llama-server terminated", "error", err, "exit", ExitStatusFromError(err))

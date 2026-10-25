@@ -603,8 +603,8 @@ func (s *Scheduler) load(req *LlmRequest, systemInfo ml.SystemInfo, gpus []ml.De
 			// Pre-flight check: estimate whether the model fits in remaining memory.
 			// llama-server auto-detects layers based on available VRAM, so if
 			// we predict it won't fit, evict before spawning.
-			// unloading models here frees nothing on a cluster worker, which
-			// holds one model at a time and was checked to be free
+			// unloading models here frees nothing on a cluster worker; the
+			// placement put the model there only into its free memory
 			if requireFull && !explicitPartialGPUOffload(launchOpts, f) && len(s.loaded) > 0 && len(loadGpus) > 0 && !workersOnly(loadGpus) {
 				freeMemory, gpuFreeMemory, systemLimited := availableMemoryForPlacement(systemInfo, loadGpus, launchOpts)
 				// Use 80% of free memory as threshold to leave headroom.

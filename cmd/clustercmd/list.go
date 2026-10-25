@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"text/tabwriter"
@@ -471,7 +474,7 @@ func placement(st *cluster.StatusResponse, l cluster.LoadedModel) string {
 		name := d.Name
 		for _, c := range st.Workers {
 			if strings.Contains(d.Name, c.Worker.Endpoint()) {
-				name = c.Worker.Label()
+				name = c.Worker.Label() + slotSuffix(c.Worker, l.WorkerSlots)
 			}
 		}
 		parts = append(parts, fmt.Sprintf("%s %s", name, humanBytes(d.Size)))
@@ -516,14 +519,42 @@ func unloads(l cluster.LoadedModel) string {
 	return "in " + humanDuration(d)
 }
 
+// slotSuffix names the worker slot a model uses when it is not the first
+// one: "#1" for the second RPC server.
+func slotSuffix(w cluster.Worker, slots []string) string {
+	ports := w.SlotPorts()
+	for _, ep := range slots {
+		host, port, err := net.SplitHostPort(ep)
+		if err != nil || host != w.Addr {
+			continue
+		}
+		p, _ := strconv.Atoi(port)
+		if i := slices.Index(ports, p); i > 0 {
+			return "#" + strconv.Itoa(i)
+		}
+	}
+	return ""
+}
+
+// busyState says how much of a usable worker is in use.
+func busyState(c cluster.WorkerCheck) string {
+	st := c.Status
+	switch {
+	case st != nil && st.MaxSlots > 0 && st.FreeSlots == st.MaxSlots:
+		return fmt.Sprintf("idle, %d slots", st.MaxSlots)
+	case st != nil && st.MaxSlots > 0:
+		return st.SlotsLabel()
+	case c.Busy:
+		return "holds a model"
+	}
+	return "idle"
+}
+
 func workerState(c cluster.WorkerCheck) string {
 	if !c.Usable {
 		return "NOT USED: " + c.Problem
 	}
-	state := "idle"
-	if c.Busy {
-		state = "holds a model"
-	}
+	state := busyState(c)
 	if t := c.Status.TransportLabel(); t != "" {
 		state += ", " + t
 	}

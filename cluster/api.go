@@ -51,6 +51,8 @@ type LoadedModel struct {
 	// Tensor is set when the model runs with tensor parallelism across this
 	// machine and the worker.
 	Tensor bool `json:"tensor,omitempty"`
+	// WorkerSlots are the RPC endpoints of the worker slots the model uses.
+	WorkerSlots []string `json:"worker_slots,omitempty"`
 	// Size is the memory the model takes in total, VRAM the part on GPUs.
 	Size uint64 `json:"size,omitempty"`
 	VRAM uint64 `json:"vram,omitempty"`
