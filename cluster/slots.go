@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"slices"
+	"strconv"
 	"time"
 )
 
@@ -96,10 +99,25 @@ func acquireSlot(ctx context.Context, w Worker) (SlotLease, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&lease); err != nil {
 		return lease, fmt.Errorf("worker %s: reserving an RPC slot: %w", w.Label(), err)
 	}
-	if lease.Endpoint == "" {
-		return lease, fmt.Errorf("worker %s: reserving an RPC slot: no endpoint in the answer", w.Label())
+	if !validSlotEndpoint(w, lease.Endpoint) {
+		return lease, fmt.Errorf("worker %s: reserving an RPC slot: unexpected endpoint %q in the answer", w.Label(), lease.Endpoint)
 	}
 	return lease, nil
+}
+
+// validSlotEndpoint reports whether ep can be an RPC server of the worker:
+// its address with one of the slot ports. The endpoint goes into the
+// llama-server arguments, so nothing else from the answer is accepted.
+func validSlotEndpoint(w Worker, ep string) bool {
+	host, port, err := net.SplitHostPort(ep)
+	if err != nil || host != w.Addr {
+		return false
+	}
+	p, err := strconv.Atoi(port)
+	if err != nil || strconv.Itoa(p) != port {
+		return false
+	}
+	return slices.Contains(SlotPorts(w.rpcPort(), w.statusPort(), MaxSlotLimit), p)
 }
 
 // ReleaseSlots gives back slots reserved by AcquireSlots for a llama-server

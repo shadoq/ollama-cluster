@@ -247,7 +247,7 @@ Generation and load are the same as on 0.40.3 within the noise, so the merge did
 - Loading over RPC is slower than from a local disk (the weights travel over the link at about 0.5 GB/s).
 - One worker holds one split model at a time.
 - Models are split by layers unless tensor parallelism is on for them ([Tensor parallelism](#tensor-parallelism)). `--split-mode row` does not work with RPC devices.
-- With tensor parallelism the worker listens for the RPC server of this machine on its RPC port + 1000 on all addresses while the model loads; the firewall rule of `ollama cluster add` covers these ports together with the RPC ports of all slots and the status port. A rule from an earlier version covers only the first RPC port and the status port; `ollama cluster doctor` reports it as outdated and prints the command that replaces it. Loading takes a little longer than split by layers (DeepSeek-V4-Flash 156 GB: 3 min 44 s against 3 min 30 s).
+- With tensor parallelism the worker listens for the RPC server of this machine on its RPC port + 1000 on all addresses while the model loads; the firewall rule of `ollama cluster add` covers these ports together with the RPC ports of all slots and the status port. A rule from an earlier version covers only the first RPC port and the status port; `ollama cluster upgrade` replaces it (asking for sudo on the worker when needed), and `ollama cluster doctor` reports it as outdated and prints the command that replaces it. Loading takes a little longer than split by layers (DeepSeek-V4-Flash 156 GB: 3 min 44 s against 3 min 30 s).
 - The image is built for DGX Spark (arm64, CUDA 13, compute capability 12.1).
 
 ### Tensor parallel in newer llama.cpp

@@ -1190,6 +1190,9 @@ func upgradeCmd() *cobra.Command {
 					return fmt.Errorf("worker %s still does not match: %s", w.Label(), c.Problem)
 				}
 				step("Worker %s on Ollama %s, llama.cpp %s", w.Label(), c.Status.Version, c.Status.LlamaCpp)
+				// a rule from a version with one RPC server leaves the
+				// ports of the extra slots open
+				ensureFirewall(ctx, rm, w)
 			}
 			if err := m.api.saveConfig(ctx, cfg); err != nil {
 				return err

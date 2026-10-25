@@ -111,6 +111,23 @@ func TestAcquireSlots(t *testing.T) {
 	}
 }
 
+func TestAcquireSlotsRejectsForeignEndpoint(t *testing.T) {
+	for _, ep := range []string{
+		"10.0.0.9:50054",                      // another host
+		"127.0.0.1:50054,10.0.0.9:50052",      // a second --rpc endpoint
+		"127.0.0.1:22",                        // not a slot port
+		"127.0.0.1:050054",                    //
+		"127.0.0.1:50054 --model /etc/shadow", // more arguments
+	} {
+		w := slotWorker(t, func(rw http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(rw).Encode(SlotLease{Index: 1, Endpoint: ep})
+		})
+		if slots, err := AcquireSlots(t.Context(), []string{w.Endpoint()}); err == nil {
+			t.Fatalf("endpoint %q accepted: %v", ep, slots)
+		}
+	}
+}
+
 func TestAcquireSlotsBusy(t *testing.T) {
 	w := slotWorker(t, func(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "all RPC servers of the worker serve a model", http.StatusConflict)
