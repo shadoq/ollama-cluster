@@ -144,6 +144,7 @@ func (s *Server) ClusterStatusHandler(c *gin.Context) {
 			lm.Devices = runnerDevices(r.llama, r.gpus, gpus)
 			lm.Tensor = llm.TensorParallel(r.pid)
 			lm.WorkerSlots = llm.WorkerSlots(r.pid)
+			lm.FellBack = r.fellBack
 		}
 		r.refMu.Unlock()
 		resp.Loaded = append(resp.Loaded, lm)

@@ -11,6 +11,7 @@ import (
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/cluster"
 	"github.com/ollama/ollama/format"
+	"github.com/ollama/ollama/llm"
 	"github.com/ollama/ollama/ml"
 )
 
@@ -318,4 +319,91 @@ func clusterFitError(modelName string, systemInfo ml.SystemInfo, allGpus, loadGp
 
 	return fmt.Errorf("%s needs about %s of memory, this machine has %s available and %s",
 		modelName, format.HumanBytes2(predictedVRAM), format.HumanBytes2(available), strings.Join(reasons, "; "))
+}
+
+// workerRetryDelay is how often the workers of a model that fell back to this
+// machine are checked; it doubles with each fallback of the model in a row,
+// up to workerRetryMax, so a worker that keeps failing at the start does not
+// make a large model reload every half minute.
+var (
+	workerRetryDelay = 30 * time.Second
+	workerRetryMax   = 30 * time.Minute
+)
+
+// workersReady reports whether the workers with these endpoints answer, run
+// this build and have an RPC server free for one more model.
+var workersReady = func(ctx context.Context, endpoints []string) bool {
+	cfg, err := cluster.LoadConfig()
+	if err != nil {
+		return false
+	}
+	for _, ep := range endpoints {
+		w, ok := cfg.WorkerByEndpoint(ep)
+		if !ok {
+			return false
+		}
+		if c := cluster.CheckWorker(ctx, w); !c.Usable || c.Busy {
+			return false
+		}
+	}
+	return true
+}
+
+// watchWorkerFallback handles a model the scheduler placed on cluster workers
+// that loaded on this machine only, because no worker took it at the start.
+// Until the model unloads, its workers are checked; once they can take it,
+// the runner asks for a reload, so the next request places the model again
+// instead of leaving it here until it expires. runner.refMu must be held.
+func (s *Scheduler) watchWorkerFallback(runner *runnerRef, gpus []ml.DeviceInfo) {
+	endpoints := cluster.Endpoints(gpus)
+	if len(endpoints) == 0 {
+		return
+	}
+
+	s.workerFallbacksMu.Lock()
+	if len(llm.WorkerSlots(runner.pid)) > 0 {
+		delete(s.workerFallbacks, runner.modelKey)
+		s.workerFallbacksMu.Unlock()
+		return
+	}
+	if s.workerFallbacks == nil {
+		s.workerFallbacks = map[string]int{}
+	}
+	n := s.workerFallbacks[runner.modelKey]
+	s.workerFallbacks[runner.modelKey] = n + 1
+	s.workerFallbacksMu.Unlock()
+
+	delay := workerRetryMax
+	if n < 6 {
+		delay = min(workerRetryDelay<<n, workerRetryMax)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.fellBack = true
+	runner.stopWatch = cancel
+	model := runner.modelKey
+	if m := runner.model.Load(); m != nil {
+		model = m.ShortName
+	}
+	slog.Warn("model placed on cluster workers runs on this machine only; checking the workers to place it again",
+		"model", model, "workers", strings.Join(endpoints, ","), "every", delay)
+
+	go func() {
+		t := time.NewTicker(delay)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			check, done := context.WithTimeout(ctx, 3*time.Second)
+			ready := workersReady(check, endpoints)
+			done()
+			if ready && ctx.Err() == nil {
+				runner.workerBack.Store(true)
+				slog.Info("cluster workers available again, the model reloads on its next request", "model", model, "workers", strings.Join(endpoints, ","))
+				return
+			}
+		}
+	}()
 }

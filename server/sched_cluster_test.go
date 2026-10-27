@@ -1,9 +1,12 @@
 package server
 
 import (
+	"context"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ollama/ollama/api"
 	"github.com/ollama/ollama/cluster"
@@ -234,5 +237,82 @@ func TestSelectClusterPlacementTensor(t *testing.T) {
 	save(cluster.Config{Workers: []cluster.Worker{{Name: "w", Addr: "10.100.48.2"}}, Tensor: true})
 	if _, launch = selectClusterPlacement("m", sys, local, remote, 20*format.GigaByte, 0, api.DefaultOptions()); tensor(launch) {
 		t.Fatal("tensor parallelism needs local_addr")
+	}
+}
+
+func TestWatchWorkerFallback(t *testing.T) {
+	delay, ready := workerRetryDelay, workersReady
+	t.Cleanup(func() { workerRetryDelay, workersReady = delay, ready })
+	workerRetryDelay = 10 * time.Millisecond
+
+	var checks, readyAfter atomic.Int32
+	readyAfter.Store(3)
+	var checked []string
+	workersReady = func(_ context.Context, endpoints []string) bool {
+		checked = endpoints
+		return checks.Add(1) >= readyAfter.Load()
+	}
+
+	worker := ml.DeviceInfo{DeviceID: ml.DeviceID{ID: "10.100.48.2:50052/0", Library: cluster.RemoteLibrary}}
+	local := ml.DeviceInfo{DeviceID: ml.DeviceID{ID: "0", Library: "CUDA"}}
+	s := &Scheduler{}
+	newRunner := func() *runnerRef {
+		opts := api.DefaultOptions()
+		r := &runnerRef{llama: &mockLlm{}, pid: -1, modelKey: "big", Options: &opts}
+		r.model.Store(&Model{ShortName: "big"})
+		return r
+	}
+	req := &LlmRequest{model: &Model{}, opts: api.DefaultOptions()}
+
+	// placed here only: nothing to watch
+	r := newRunner()
+	s.watchWorkerFallback(r, []ml.DeviceInfo{local})
+	if r.fellBack || r.stopWatch != nil {
+		t.Fatal("a model placed on this machine was taken for a fallback")
+	}
+
+	// placed with the worker, loaded without a slot of it
+	r = newRunner()
+	s.watchWorkerFallback(r, []ml.DeviceInfo{local, worker})
+	if !r.fellBack {
+		t.Fatal("fallback not noticed")
+	}
+	if r.needsReload(t.Context(), req) {
+		t.Fatal("reload asked for before the worker is back")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !r.workerBack.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("the worker coming back was not noticed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if want := []string{"10.100.48.2:50052"}; !slices.Equal(checked, want) {
+		t.Fatalf("checked workers %v, want %v", checked, want)
+	}
+	if !r.needsReload(t.Context(), req) {
+		t.Fatal("no reload once the worker is back")
+	}
+	r.unload()
+
+	// the next fallback in a row waits longer; an unloaded model stops the checks
+	if n := s.workerFallbacks["big"]; n != 1 {
+		t.Fatalf("fallbacks in a row = %d, want 1", n)
+	}
+	readyAfter.Store(1 << 30)
+	r = newRunner()
+	s.watchWorkerFallback(r, []ml.DeviceInfo{worker})
+	if n := s.workerFallbacks["big"]; n != 2 {
+		t.Fatalf("fallbacks in a row = %d, want 2", n)
+	}
+	time.Sleep(50 * time.Millisecond)
+	r.unload()
+	before := checks.Load()
+	time.Sleep(50 * time.Millisecond)
+	if after := checks.Load(); after != before {
+		t.Fatalf("workers still checked after the model unloaded: %d more checks", after-before)
+	}
+	if r.workerBack.Load() {
+		t.Fatal("unloaded model asked for a reload")
 	}
 }

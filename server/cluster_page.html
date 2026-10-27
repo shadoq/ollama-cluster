@@ -181,7 +181,7 @@ function renderLoaded(st, act) {
     for (const d of l.devices || []) {
       if (d.remote) parts.push(`${esc(workerFor(st, d.name))} ${bytes(d.size)}`); else local += d.size;
     }
-    const where = !parts.length ? "here" : local === 0 ? `<span class="pill">worker</span> ${parts.join(" + ")}` : `<span class="pill">split</span> here ${bytes(local)} + ${parts.join(" + ")}`;
+    const where = l.fell_back ? `here <span class="warn">fell back: no worker took it at the start</span>` : !parts.length ? "here" : local === 0 ? `<span class="pill">worker</span> ${parts.join(" + ")}` : `<span class="pill">split</span> here ${bytes(local)} + ${parts.join(" + ")}`;
     let until = "-";
     if (l.loading) until = `<span class="warn">loading</span>`;
     else if (l.active > 0) until = `<span class="ok">in use</span>`;

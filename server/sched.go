@@ -82,6 +82,11 @@ type Scheduler struct {
 	getGpuFn        func(ctx context.Context, runners []ml.FilteredRunnerDiscovery) []ml.DeviceInfo
 	getSystemInfoFn func() ml.SystemInfo
 	waitForRecovery time.Duration
+
+	// workerFallbacks counts, by model key, the starts in a row that fell
+	// back to this machine because no cluster worker took the model.
+	workerFallbacksMu sync.Mutex
+	workerFallbacks   map[string]int
 }
 
 // loadedModelsForName returns models still owned by loaded runners. The models
@@ -811,6 +816,7 @@ iGPUScan:
 		if runner.pid < 0 {
 			runner.pid = llama.Pid()
 		}
+		s.watchWorkerFallback(runner, loadGpus)
 		runner.refCount++
 		runner.loading = false
 		go func() {
@@ -1426,6 +1432,14 @@ type runnerRef struct {
 	useMMapAuto  bool
 	contextShift bool
 	trainContext int
+
+	// fellBack is set when the model was placed on cluster workers but loaded
+	// on this machine only; stopWatch stops checking the workers and
+	// workerBack is set once they can take the model again.
+	fellBack   bool
+	stopWatch  context.CancelFunc
+	workerBack atomic.Bool
+
 	*api.Options
 }
 
@@ -1437,6 +1451,10 @@ func (runner *runnerRef) unload() {
 	}
 	if runner.llama != nil {
 		runner.llama.Close()
+	}
+	if runner.stopWatch != nil {
+		runner.stopWatch()
+		runner.stopWatch = nil
 	}
 	runner.model.Store(nil)
 	runner.Options = nil
@@ -1455,6 +1473,11 @@ func (runner *runnerRef) needsReload(ctx context.Context, req *LlmRequest) bool 
 	}
 
 	if runner.Options == nil {
+		return true
+	}
+
+	// the model fell back to this machine and its workers are back
+	if runner.workerBack.Load() {
 		return true
 	}
 

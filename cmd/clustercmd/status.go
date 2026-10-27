@@ -73,7 +73,11 @@ func printStatus(m *mainOllama) {
 		for _, d := range l.Devices {
 			parts = append(parts, fmt.Sprintf("%s on %s", humanBytes(d.Size), d.Name))
 		}
-		fmt.Printf("  %-34s context %-7d %s\n", l.Model, l.Context, strings.Join(parts, " + "))
+		note := ""
+		if l.FellBack {
+			note = "  (no worker took it at the start; it moves there on a request once the worker is back)"
+		}
+		fmt.Printf("  %-34s context %-7d %s%s\n", l.Model, l.Context, strings.Join(parts, " + "), note)
 	}
 
 	if len(st.Config.Locations) > 0 {

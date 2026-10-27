@@ -53,6 +53,9 @@ type LoadedModel struct {
 	Tensor bool `json:"tensor,omitempty"`
 	// WorkerSlots are the RPC endpoints of the worker slots the model uses.
 	WorkerSlots []string `json:"worker_slots,omitempty"`
+	// FellBack is set when the model was placed on cluster workers but no
+	// worker took it at the start, so it runs on this machine only.
+	FellBack bool `json:"fell_back,omitempty"`
 	// Size is the memory the model takes in total, VRAM the part on GPUs.
 	Size uint64 `json:"size,omitempty"`
 	VRAM uint64 `json:"vram,omitempty"`
